@@ -1,0 +1,1 @@
+Browser tool instructions: respect robots, cache results, return sources.

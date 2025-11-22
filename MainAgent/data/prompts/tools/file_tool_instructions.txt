@@ -1,0 +1,1 @@
+File tool instructions: read/write safely, avoid destructive ops without confirmation.

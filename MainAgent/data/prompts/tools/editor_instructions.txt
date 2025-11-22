@@ -1,0 +1,1 @@
+Editor tool instructions: apply patches safely, run tests where possible.
