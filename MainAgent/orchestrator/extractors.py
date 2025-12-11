@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import re
+import sys
 from typing import Dict
 
 from .file_manager import FileManager
+
+
+def _safe_print(text: str) -> None:
+    """Print text safely, handling encoding issues on Windows."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        # Fallback: remove or replace emojis for Windows console
+        safe_text = text.encode('ascii', 'replace').decode('ascii')
+        print(safe_text)
 
 
 def extract_and_write_files(
@@ -15,8 +26,8 @@ def extract_and_write_files(
 ) -> Dict[str, int]:
     """Extract code fences from agent output and write them to the project."""
 
-    print(f"\n   🔍 DEBUG: Searching for code blocks in {agent_name} output...")
-    print(f"   📝 Output length: {len(agent_output)} characters\n")
+    _safe_print(f"\n   [DEBUG] Searching for code blocks in {agent_name} output...")
+    _safe_print(f"   [INFO] Output length: {len(agent_output)} characters\n")
 
     files_written: Dict[str, int] = {}
     processed_ranges: list[tuple[int, int]] = []  # Track processed regions to avoid duplicates
@@ -60,7 +71,7 @@ def extract_and_write_files(
     for pattern, name in patterns:
         matches = list(re.finditer(pattern, agent_output, re.IGNORECASE | re.MULTILINE))
         if matches:
-            print(f"   ✓ Found {len(matches)} match(es) with pattern: {name}")
+            _safe_print(f"   [OK] Found {len(matches)} match(es) with pattern: {name}")
 
         for idx, match in enumerate(matches):
             # Skip if this region was already processed
@@ -108,28 +119,60 @@ def extract_and_write_files(
                 continue
 
             if file_exists:
-                print(f"   🔄 File exists, replacing: {filename}")
+                _safe_print(f"   [REPLACE] File exists, replacing: {filename}")
             else:
-                print(f"   📝 Attempting to write: {filename}")
-            
+                _safe_print(f"   [WRITE] Attempting to write: {filename}")
+
             try:
                 file_manager.write_file(filename, content)
                 files_written[filename] = len(content)
                 # Mark this region as processed
                 processed_ranges.append((match.start(), match.end()))
             except Exception as exc:  # pragma: no cover
-                print(f"   ❌ Error writing {filename}: {exc}")
+                _safe_print(f"   [ERROR] Error writing {filename}: {exc}")
 
     if not files_written:
-        print(f"   ⚠️  No files extracted from {agent_name} output")
+        _safe_print(f"   [WARN] No files extracted from {agent_name} output")
         debug_file = f"debug_{agent_name.lower()}_output.txt"
         try:
             file_manager.write_file(debug_file, agent_output)
-            print(f"   📄 Saved raw output to {debug_file} for inspection")
+            _safe_print(f"   [DEBUG] Saved raw output to {debug_file} for inspection")
         except Exception:
             pass
 
     return files_written
+
+
+def _normalize_line_endings(text: str) -> str:
+    """Normalize line endings to Unix style and handle common whitespace issues."""
+    # Convert Windows line endings to Unix
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    return text
+
+
+def _strip_outer_only(text: str) -> str:
+    """Strip only the outer whitespace while preserving internal indentation.
+
+    This removes leading/trailing blank lines but keeps indentation on content lines.
+    """
+    lines = text.split('\n')
+
+    # Find first non-empty line
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+
+    # Find last non-empty line
+    end = len(lines) - 1
+    while end >= 0 and not lines[end].strip():
+        end -= 1
+
+    if start > end:
+        return ""
+
+    # Return lines with preserved indentation, but strip trailing whitespace from each line
+    result_lines = [line.rstrip() for line in lines[start:end + 1]]
+    return '\n'.join(result_lines)
 
 
 def extract_and_apply_edits(
@@ -140,36 +183,74 @@ def extract_and_apply_edits(
     """Extract edit instructions and apply them to the project files."""
 
     edits_applied: Dict[str, bool] = {}
-    
-    # Pattern 1: ===EDIT=== format (most explicit)
-    edit_pattern = (
-        r"===EDIT===\s*\nfile:\s*([^\n]+)\s*\nold:\s*\n([\s\S]*?)\nnew:\s*\n([\s\S]*?)\n===END==="
-    )
 
-    for match in re.finditer(edit_pattern, agent_output, re.IGNORECASE | re.MULTILINE):
-        filepath = match.group(1).strip()
-        old_code = match.group(2).strip()
-        new_code = match.group(3).strip()
-        
-        if not filepath or not old_code or not new_code:
+    # Normalize line endings in the entire output first
+    agent_output = _normalize_line_endings(agent_output)
+
+    # Single unified pattern that handles all common ===EDIT=== variants
+    # This pattern is flexible enough to handle:
+    # - Standard format with newlines after old:/new:
+    # - Compact format where content starts on same line
+    # - Extra whitespace around markers
+    edit_pattern = r"""
+        ===\s*EDIT\s*===\s*\n                    # Opening marker
+        \s*file\s*:\s*([^\n]+?)\s*\n             # Capture filepath
+        \s*old\s*:\s*\n?                         # old: label (newline optional)
+        ([\s\S]*?)                               # Capture old code (non-greedy)
+        \n\s*new\s*:\s*\n?                       # new: label (newline optional)
+        ([\s\S]*?)                               # Capture new code (non-greedy)
+        \n\s*===\s*END\s*===                     # Closing marker
+    """
+
+    processed_edits = set()  # Track to avoid duplicate edits (by position in source)
+    processed_positions = set()  # Track by match position to avoid duplicates
+
+    for match in re.finditer(edit_pattern, agent_output, re.IGNORECASE | re.MULTILINE | re.VERBOSE):
+        # Skip if we've already processed this position
+        if match.start() in processed_positions:
             continue
-            
-        print(f"   ✏️  Attempting to edit: {filepath}")
+        processed_positions.add(match.start())
+
+        filepath = match.group(1).strip()
+        # Use _strip_outer_only to preserve indentation
+        old_code = _strip_outer_only(match.group(2))
+        new_code = _strip_outer_only(match.group(3))
+
+        # Skip if we've already processed this exact edit
+        edit_key = f"{filepath}:{old_code}"
+        if edit_key in processed_edits:
+            continue
+        processed_edits.add(edit_key)
+
+        if not filepath:
+            _safe_print(f"   [WARN] Skipping edit: no filepath specified")
+            continue
+
+        if not old_code:
+            _safe_print(f"   [WARN] Skipping edit for {filepath}: no old code specified")
+            continue
+
+        # new_code can be empty (deletion case)
+        _safe_print(f"   [EDIT] Attempting to edit: {filepath}")
+        _safe_print(f"      Old code length: {len(old_code)} chars, New code length: {len(new_code)} chars")
+
         success = file_manager.edit_file(filepath, old_code, new_code)
         edits_applied[filepath] = success
+
         if not success:
-            print(f"   ⚠️  Edit failed - check if old code matches exactly")
+            _safe_print(f"   [WARN] Edit failed for {filepath}")
+            _safe_print(f"      Tip: Check if 'old' code matches file content exactly (including whitespace)")
 
     # Pattern 2: APPEND_TO format
     append_pattern = r"APPEND_TO:\s*([^\n]+)\s*\n([\s\S]*?)\nEND_APPEND"
     for match in re.finditer(append_pattern, agent_output, re.IGNORECASE | re.MULTILINE):
         filepath = match.group(1).strip()
-        content = match.group(2).strip()
-        
+        content = _strip_outer_only(match.group(2))
+
         if not filepath or not content:
             continue
-            
-        print(f"   ➕ Attempting to append to: {filepath}")
+
+        _safe_print(f"   [APPEND] Attempting to append to: {filepath}")
         success = file_manager.append_to_file(filepath, content)
         edits_applied[f"{filepath}_append"] = success
 

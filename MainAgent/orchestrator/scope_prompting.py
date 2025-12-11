@@ -7,7 +7,7 @@ import re
 from typing import Dict, List, Tuple
 
 from .context import AgentContext
-from MainAgent.core.runtime.llm import llm_call
+from core.runtime.llm import llm_call
 
 
 def scope_analyzer(user_request: str) -> Tuple[Dict, List[str]]:

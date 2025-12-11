@@ -1,3 +1,5 @@
+groq
 openai
 python-dotenv
 requests
+lancedb

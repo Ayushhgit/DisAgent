@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from .context import AgentContext
 from .extractors import extract_and_apply_edits, extract_and_write_files
 from .file_manager import FileManager
-from MainAgent.core.runtime.llm import llm_call
+from core.runtime.llm import llm_call
 
 
 def create_dynamic_agent(
@@ -18,61 +18,67 @@ def create_dynamic_agent(
     user_request: str,
     context: AgentContext,
     file_manager: FileManager,
+    allowed_files: Optional[List[str]] = None,
 ) -> str:
     """Execute a dynamic agent prompt and materialize produced files."""
 
     # Get project structure and file summaries
     project_structure = file_manager.get_project_structure_tree()
     available_files = file_manager.list_files("*")
+    if allowed_files is not None:
+        # Filter available files to only those allowed (simple path match)
+        allowed_set = set(allowed_files)
+        available_files = [f for f in available_files if f in allowed_set]
 
     # Build comprehensive file context for agents
     files_context = "=" * 70 + "\n"
-    files_context += "📁 PROJECT STRUCTURE & FILE SUMMARIES\n"
+    files_context += "PROJECT STRUCTURE & FILE SUMMARIES\n"
     files_context += "=" * 70 + "\n\n"
     
     if available_files:
         files_context += project_structure
-        files_context += f"\n📊 Total Files Found: {len(available_files)}\n"
-        
+        files_context += f"\nTotal Files Found: {len(available_files)}\n"
+
         # Show directory breakdown
         dirs = set()
         for file_path in available_files:
             parent = str(Path(file_path).parent)
             if parent != ".":
                 dirs.add(parent)
-        
+
         if dirs:
-            files_context += f"📂 Subdirectories: {len(dirs)}\n"
+            files_context += f"Subdirectories: {len(dirs)}\n"
             files_context += f"   {', '.join(sorted(dirs)[:10])}"
             if len(dirs) > 10:
                 files_context += f" ... and {len(dirs) - 10} more"
             files_context += "\n"
-        
+
         files_context += "\n"
-        
+
         files_context += "=" * 70 + "\n"
-        files_context += "📋 FILE SUMMARIES (Quick Overview)\n"
+        files_context += "FILE SUMMARIES (Quick Overview)\n"
         files_context += "=" * 70 + "\n\n"
-        
-        # Generate summaries for all files
+
+        # Generate summaries for the selected files
         for file_name in sorted(available_files):
             summary = file_manager.get_file_summary(file_name)
             files_context += f"{summary}\n\n"
-        
+
         files_context += "=" * 70 + "\n"
-        files_context += "📄 FULL FILE CONTENTS (For Editing)\n"
+        files_context += "FULL FILE CONTENTS (For Editing)\n"
         files_context += "=" * 70 + "\n\n"
-        
+
         # Include full file contents (with size limits for very large files)
         # Increased limit for directory-level operations
-        file_limit = min(50, len(available_files))  # Show up to 50 files
+        # Limit the number of full files included to avoid huge prompts
+        file_limit = min(20, len(available_files))  # Show up to 20 files by default
         for file_name in sorted(available_files)[:file_limit]:
             content = file_manager.read_file(file_name)
             if content:
                 files_context += f"\n{'='*70}\n"
-                files_context += f"📄 FILE: {file_name}\n"
+                files_context += f"FILE: {file_name}\n"
                 files_context += f"{'='*70}\n"
-                
+
                 # For larger files, show first and last portions with summary
                 if len(content) > 3000:
                     files_context += f"[FILE SIZE: {len(content)} chars, {len(content.splitlines())} lines]\n"
@@ -89,11 +95,11 @@ def create_dynamic_agent(
                 files_context += f"\n{'='*70}\n\n"
             else:
                 files_context += f"\n{'='*70}\n"
-                files_context += f"📄 FILE: {file_name}\n"
+                files_context += f"FILE: {file_name}\n"
                 files_context += f"[Could not read file or file is empty]\n"
                 files_context += f"{'='*70}\n\n"
     else:
-        files_context += "📁 (Empty project - no files exist yet)\n"
+        files_context += "(Empty project - no files exist yet)\n"
         files_context += "You can create new files using the format below.\n\n"
 
     full_prompt = f"""{custom_prompt}
@@ -164,32 +170,32 @@ FILE ACCESS:
     try:
         output = llm_call(full_prompt, max_tokens=8192, temperature=0.7)
     except Exception as exc:
-        print(f"   ❌ Error calling LLM: {exc}\n")
+        print(f"   [ERROR] Error calling LLM: {exc}\n")
         output = ""
 
     if not output or len(output) < 50:
-        print(f"   ⚠️  Warning: {agent_name} produced minimal output")
+        print(f"   [WARN] Warning: {agent_name} produced minimal output")
 
     context.add_result(agent_name, output)
 
-    print(f"\n   🔄 Processing {agent_name} output - creating/editing files...\n")
+    print(f"\n   [PROCESSING] Processing {agent_name} output - creating/editing files...\n")
     try:
         files_written = extract_and_write_files(output, file_manager, agent_name)
         edits_applied = extract_and_apply_edits(output, file_manager, agent_name)
     except Exception as exc:
-        print(f"   ❌ Error processing agent output: {exc}\n")
+        print(f"   [ERROR] Error processing agent output: {exc}\n")
         import traceback
         traceback.print_exc()
         files_written = {}
         edits_applied = {}
 
     if files_written:
-        print(f"\n   ✅ Created {len(files_written)} new file(s)")
+        print(f"\n   [OK] Created {len(files_written)} new file(s)")
     if edits_applied:
         successful = sum(1 for value in edits_applied.values() if value)
-        print(f"   ✅ Applied {successful} edit(s) to existing files")
+        print(f"   [OK] Applied {successful} edit(s) to existing files")
     if not files_written and not edits_applied:
-        print(f"\n   ⚠️  WARNING: No file changes made by {agent_name}")
+        print(f"\n   [WARN] WARNING: No file changes made by {agent_name}")
 
     return output
 

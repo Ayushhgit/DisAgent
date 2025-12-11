@@ -7,12 +7,12 @@ import re
 import sys
 from pathlib import Path
 
-# Add the workspace root to Python path so imports work
-workspace_root = Path(__file__).parent.parent
-if str(workspace_root) not in sys.path:
-    sys.path.insert(0, str(workspace_root))
+# Add the MainAgent directory to Python path so imports work
+mainagent_root = Path(__file__).parent.resolve()
+if str(mainagent_root) not in sys.path:
+    sys.path.insert(0, str(mainagent_root))
 
-from MainAgent.orchestrator import dynamic_orchestrator, planning_orchestrator
+from orchestrator.unified_orchestrator import orchestrator
 
 
 def _generate_project_name(prompt: str) -> str:
@@ -61,12 +61,6 @@ Examples:
         """,
     )
     parser.add_argument(
-        "--mode",
-        choices=["dynamic", "planning"],
-        default="dynamic",
-        help="Which orchestrator workflow to run.",
-    )
-    parser.add_argument(
         "--prompt",
         required=False,
         default="Build a personal portfolio website using React, Node.js, and MongoDB.",
@@ -93,58 +87,55 @@ Examples:
     if args.list_projects:
         projects = _list_existing_projects()
         if projects:
-            print("\n📁 Existing Projects:\n")
+            print("\n[PROJECTS] Existing Projects:\n")
             for project in sorted(projects):
                 rel_path = project.relative_to(Path(__file__).parent)
-                print(f"  • {rel_path}")
-            print(f"\n💡 Use --project <path> to work on an existing project")
+                print(f"  - {rel_path}")
+            print(f"\n[TIP] Use --project <path> to work on an existing project")
             print(f"   Example: --project output/projects/{projects[0].name}\n")
         else:
-            print("\n📁 No existing projects found in output/projects/\n")
+            print("\n[PROJECTS] No existing projects found in output/projects/\n")
         return
 
     # Determine output path
-    if args.mode == "dynamic":
-        if args.project:
-            # Use existing project path
-            project_path = Path(args.project)
-            if not project_path.is_absolute():
-                # Make relative to MainAgent directory
-                mainagent_dir = Path(__file__).parent
-                project_path = mainagent_dir / project_path
-            
-            resolved_path = project_path.resolve()
-            
-            # Allow directory-level paths - will scan all subfolders and files
-            if resolved_path.is_dir():
-                args.output = str(resolved_path)
-                # Count files in directory and subdirectories
-                try:
-                    all_files = list(resolved_path.rglob("*"))
-                    file_count = sum(1 for f in all_files if f.is_file())
-                    dir_count = sum(1 for f in all_files if f.is_dir())
-                    print(f"📂 Working on directory: {args.output}")
-                    print(f"   Found {file_count} file(s) in {dir_count} subdirectory(ies)\n")
-                except Exception:
-                    print(f"📂 Working on directory: {args.output}\n")
-            elif not resolved_path.exists():
-                print(f"\n⚠️  Warning: Path does not exist: {resolved_path}")
-                print(f"   Creating new project at this location...\n")
-                args.output = str(resolved_path)
-            else:
-                args.output = str(resolved_path)
-                print(f"📂 Working on project: {args.output}\n")
-        elif args.output is None:
-            # Create new project with auto-generated name
+    if args.project:
+        # Use existing project path
+        project_path = Path(args.project)
+        if not project_path.is_absolute():
+            # Make relative to MainAgent directory
             mainagent_dir = Path(__file__).parent
-            project_name = _generate_project_name(args.prompt)
-            args.output = str(mainagent_dir / "output" / "projects" / project_name)
-            print(f"📂 Creating new project: {args.output}\n")
+            project_path = mainagent_dir / project_path
 
-    if args.mode == "dynamic":
-        dynamic_orchestrator.orchestrator(args.prompt, output_folder=args.output)
-    else:
-        planning_orchestrator.orchestrator(args.prompt)
+        resolved_path = project_path.resolve()
+
+        # Allow directory-level paths - will scan all subfolders and files
+        if resolved_path.is_dir():
+            args.output = str(resolved_path)
+            # Count files in directory and subdirectories
+            try:
+                all_files = list(resolved_path.rglob("*"))
+                file_count = sum(1 for f in all_files if f.is_file())
+                dir_count = sum(1 for f in all_files if f.is_dir())
+                print(f"[DIR] Working on directory: {args.output}")
+                print(f"   Found {file_count} file(s) in {dir_count} subdirectory(ies)\n")
+            except Exception:
+                print(f"[DIR] Working on directory: {args.output}\n")
+        elif not resolved_path.exists():
+            print(f"\n[WARN] Path does not exist: {resolved_path}")
+            print(f"   Creating new project at this location...\n")
+            args.output = str(resolved_path)
+        else:
+            args.output = str(resolved_path)
+            print(f"[DIR] Working on project: {args.output}\n")
+    elif args.output is None:
+        # Create new project with auto-generated name
+        mainagent_dir = Path(__file__).parent
+        project_name = _generate_project_name(args.prompt)
+        args.output = str(mainagent_dir / "output" / "projects" / project_name)
+        print(f"[DIR] Creating new project: {args.output}\n")
+
+    # Run the unified orchestrator
+    orchestrator(args.prompt, output_folder=args.output)
 
 
 if __name__ == "__main__":

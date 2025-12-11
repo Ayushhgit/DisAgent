@@ -6,12 +6,18 @@ import os
 from typing import Iterable, List, Optional
 
 from groq import Groq
+from dotenv import load_dotenv
+
+load_dotenv()
 
 try:
-    from MainAgent.config import CONFIG
-except ImportError:
+    from ...config import CONFIG
+except Exception:
     # Fallback if config not available
-    CONFIG = {}
+    try:
+        from MainAgent.config import CONFIG  # last resort for older import styles
+    except Exception:
+        CONFIG = {}
 
 
 class GroqService:

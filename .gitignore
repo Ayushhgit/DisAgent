@@ -74,3 +74,6 @@ Thumbs.db
 
 
 .output/
+.claude/
+.agent_memory/
+Archives/
