@@ -76,93 +76,174 @@ class FileManager:
         lines = [line.rstrip() for line in text.split('\n')]
         return '\n'.join(lines)
 
+    def _dedent_code(self, code: str) -> str:
+        """Remove common leading indentation from all lines."""
+        lines = code.split('\n')
+        non_empty_lines = [l for l in lines if l.strip()]
+        if not non_empty_lines:
+            return code
+
+        # Find minimum indentation
+        min_indent = float('inf')
+        for line in non_empty_lines:
+            stripped = line.lstrip()
+            if stripped:
+                indent = len(line) - len(stripped)
+                min_indent = min(min_indent, indent)
+
+        if min_indent == float('inf') or min_indent == 0:
+            return code
+
+        # Remove common indentation
+        result_lines = []
+        for line in lines:
+            if line.strip():
+                result_lines.append(line[min_indent:] if len(line) >= min_indent else line)
+            else:
+                result_lines.append('')
+
+        return '\n'.join(result_lines)
+
     def _find_best_match_position(self, content: str, old_code: str) -> tuple:
         """Find the best matching position for old_code in content.
 
+        Uses a multi-stage matching strategy:
+        1. Exact match (fastest)
+        2. Normalized match (whitespace-insensitive)
+        3. Dedented match (handles indent differences)
+        4. Line-by-line stripped match
+        5. Fuzzy match with sliding window
+
         Returns (start_idx, end_idx, match_quality) where:
         - start_idx, end_idx are line indices (or -1 if no match)
-        - match_quality is 'exact', 'normalized', 'fuzzy', or None
+        - match_quality is 'exact', 'normalized', 'dedented', 'stripped', 'fuzzy', or None
         """
-        # Normalize both for comparison
-        norm_content = self._normalize_for_comparison(content)
-        norm_old = self._normalize_for_comparison(old_code)
-
-        # Stage 1: Try exact match on normalized content
-        if norm_old in norm_content:
-            # Find line-based position for replacement
-            content_lines = content.split('\n')
-            old_lines = old_code.split('\n')
-
-            # Find where the normalized match occurs
-            for start_idx in range(len(content_lines) - len(old_lines) + 1):
-                chunk = '\n'.join(content_lines[start_idx:start_idx + len(old_lines)])
-                if self._normalize_for_comparison(chunk) == norm_old:
-                    return (start_idx, start_idx + len(old_lines), 'normalized')
-
-        # Stage 2: Try matching with whitespace-only differences
         content_lines = content.split('\n')
-        old_lines = old_code.strip().split('\n')
+        old_lines = old_code.split('\n')
 
-        if len(old_lines) == 0:
+        # Clean old_lines - remove empty lines at start/end
+        while old_lines and not old_lines[0].strip():
+            old_lines = old_lines[1:]
+        while old_lines and not old_lines[-1].strip():
+            old_lines = old_lines[:-1]
+
+        if not old_lines:
             return (-1, -1, None)
 
-        for start_idx in range(len(content_lines) - len(old_lines) + 1):
-            potential_lines = content_lines[start_idx:start_idx + len(old_lines)]
+        num_old_lines = len(old_lines)
 
-            # Compare stripped versions line by line
-            if all(
-                ol.strip() == pl.strip()
-                for ol, pl in zip(old_lines, potential_lines)
-            ):
-                return (start_idx, start_idx + len(old_lines), 'normalized')
+        # Stage 1: Normalized exact match
+        norm_content = self._normalize_for_comparison(content)
+        norm_old = self._normalize_for_comparison('\n'.join(old_lines))
 
-        # Stage 3: Fuzzy match - find region with highest similarity
+        if norm_old in norm_content:
+            # Find line-based position
+            for start_idx in range(len(content_lines) - num_old_lines + 1):
+                chunk = '\n'.join(content_lines[start_idx:start_idx + num_old_lines])
+                if self._normalize_for_comparison(chunk) == norm_old:
+                    return (start_idx, start_idx + num_old_lines, 'normalized')
+
+        # Stage 2: Dedented match - normalize both sides by removing common indent
+        dedented_old = self._dedent_code('\n'.join(old_lines))
+        dedented_old_lines = dedented_old.split('\n')
+
+        for start_idx in range(len(content_lines) - num_old_lines + 1):
+            chunk = '\n'.join(content_lines[start_idx:start_idx + num_old_lines])
+            dedented_chunk = self._dedent_code(chunk)
+            if self._normalize_for_comparison(dedented_chunk) == self._normalize_for_comparison(dedented_old):
+                return (start_idx, start_idx + num_old_lines, 'dedented')
+
+        # Stage 3: Line-by-line stripped match (ignoring all leading/trailing whitespace)
+        stripped_old = [l.strip() for l in old_lines]
+
+        for start_idx in range(len(content_lines) - num_old_lines + 1):
+            potential_lines = content_lines[start_idx:start_idx + num_old_lines]
+            stripped_potential = [l.strip() for l in potential_lines]
+
+            if stripped_old == stripped_potential:
+                return (start_idx, start_idx + num_old_lines, 'stripped')
+
+        # Stage 4: Fuzzy match with sliding window - lower threshold and better algorithm
         best_ratio = 0.0
         best_start = -1
+        best_window_size = num_old_lines
 
-        # Normalize old_code for fuzzy comparison (remove all whitespace)
-        old_normalized = ''.join(old_lines).replace(' ', '').replace('\t', '').lower()
-
-        if len(old_normalized) < 5:  # Too short for meaningful fuzzy match
-            return (-1, -1, None)
-
-        for start_idx in range(len(content_lines) - len(old_lines) + 1):
-            potential_lines = content_lines[start_idx:start_idx + len(old_lines)]
-            pot_normalized = ''.join(potential_lines).replace(' ', '').replace('\t', '').lower()
-
-            if not pot_normalized:
+        # Try different window sizes (in case old_code has extra/missing lines)
+        for window_delta in [0, -1, 1, -2, 2]:
+            window_size = num_old_lines + window_delta
+            if window_size < 1 or window_size > len(content_lines):
                 continue
 
-            # Calculate similarity ratio properly
-            # Use the longer string as the denominator to avoid inflated ratios
-            max_len = max(len(old_normalized), len(pot_normalized))
-            if max_len == 0:
+            # Normalize old_code for fuzzy comparison
+            old_joined = ''.join(stripped_old)
+            old_normalized = old_joined.replace(' ', '').replace('\t', '').lower()
+
+            if len(old_normalized) < 3:
                 continue
 
-            # Count matching characters
-            matches = sum(1 for a, b in zip(old_normalized, pot_normalized) if a == b)
-            # Penalize length differences
-            length_penalty = abs(len(old_normalized) - len(pot_normalized)) / max_len
-            ratio = (matches / max_len) - (length_penalty * 0.5)
+            for start_idx in range(len(content_lines) - window_size + 1):
+                potential_lines = content_lines[start_idx:start_idx + window_size]
+                pot_joined = ''.join(l.strip() for l in potential_lines)
+                pot_normalized = pot_joined.replace(' ', '').replace('\t', '').lower()
 
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_start = start_idx
+                if not pot_normalized:
+                    continue
 
-        # Require at least 80% match for fuzzy
-        if best_ratio >= 0.80 and best_start >= 0:
-            return (best_start, best_start + len(old_lines), 'fuzzy')
+                # Calculate Levenshtein-like similarity
+                ratio = self._sequence_similarity(old_normalized, pot_normalized)
+
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_start = start_idx
+                    best_window_size = window_size
+
+        # Lower threshold to 65% for fuzzy matching to catch more cases
+        if best_ratio >= 0.65 and best_start >= 0:
+            return (best_start, best_start + best_window_size, 'fuzzy')
 
         return (-1, -1, None)
 
+    def _sequence_similarity(self, s1: str, s2: str) -> float:
+        """Calculate similarity between two strings using longest common subsequence."""
+        if not s1 or not s2:
+            return 0.0
+
+        # Use a simplified LCS-based similarity
+        len1, len2 = len(s1), len(s2)
+        max_len = max(len1, len2)
+
+        if max_len == 0:
+            return 1.0
+
+        # Quick check: if lengths are very different, low similarity
+        if abs(len1 - len2) / max_len > 0.5:
+            return 0.0
+
+        # Count matching character pairs (order-sensitive)
+        matches = 0
+        j = 0
+        for i in range(len1):
+            # Try to find s1[i] in remaining s2
+            while j < len2:
+                if s1[i] == s2[j]:
+                    matches += 1
+                    j += 1
+                    break
+                j += 1
+
+        # Calculate ratio based on matches vs max possible
+        return (2.0 * matches) / (len1 + len2)
+
     def edit_file(self, rel_path: str, old_code: str, new_code: str) -> bool:
-        """Edit file by replacing code section (thread-safe, 3-stage strategy).
+        """Edit file by replacing code section (thread-safe, multi-stage strategy).
 
         Stages:
         1. Exact match (after line ending normalization)
-        2. Normalized match (whitespace-insensitive line comparison)
-        3. Fuzzy match (80%+ character similarity)
-        4. Fallback: Create .proposed_change file for manual review
+        2. Normalized match (whitespace-insensitive)
+        3. Dedented match (handles indentation differences)
+        4. Stripped match (line-by-line comparison)
+        5. Fuzzy match (65%+ similarity)
+        6. Fallback: Create .proposed_change file for manual review
         """
         with self._lock:
             content = self.read_file(rel_path)
@@ -170,21 +251,27 @@ class FileManager:
                 _safe_print(f"   [!] File not found: {rel_path}")
                 return False
 
+            # Clean up the old_code - remove leading/trailing empty lines
+            old_code_clean = old_code.strip()
+            if not old_code_clean:
+                _safe_print(f"   [!] Empty old code provided for: {rel_path}")
+                return False
+
             # Normalize line endings in both content and old_code
             norm_content = self._normalize_for_comparison(content)
-            norm_old = self._normalize_for_comparison(old_code)
+            norm_old = self._normalize_for_comparison(old_code_clean)
 
             # Stage 1: Direct exact match (fastest path)
-            if old_code in content:
-                updated = content.replace(old_code, new_code, 1)
+            if old_code_clean in content:
+                updated = content.replace(old_code_clean, new_code, 1)
                 full_path = self.base_path / rel_path
                 with open(full_path, "w", encoding="utf-8") as handle:
                     handle.write(updated)
 
                 self.edit_history.append(
-                    {"file": rel_path, "timestamp": time.time(), "action": "replace", "stage": 1}
+                    {"file": rel_path, "timestamp": time.time(), "action": "replace", "stage": "exact"}
                 )
-                _safe_print(f"   [~] Edited (exact): {rel_path}")
+                _safe_print(f"   [~] Edited (exact match): {rel_path}")
                 return True
 
             # Stage 1b: Exact match with normalized line endings
@@ -195,17 +282,48 @@ class FileManager:
                     handle.write(updated)
 
                 self.edit_history.append(
-                    {"file": rel_path, "timestamp": time.time(), "action": "replace", "stage": "1b"}
+                    {"file": rel_path, "timestamp": time.time(), "action": "replace", "stage": "normalized_exact"}
                 )
                 _safe_print(f"   [~] Edited (normalized): {rel_path}")
                 return True
 
-            # Stage 2 & 3: Use position finder for normalized/fuzzy matches
-            start_idx, end_idx, match_quality = self._find_best_match_position(content, old_code)
+            # Stage 2-5: Use improved position finder
+            start_idx, end_idx, match_quality = self._find_best_match_position(content, old_code_clean)
 
-            if match_quality in ('normalized', 'fuzzy') and start_idx >= 0:
+            if match_quality and start_idx >= 0:
                 content_lines = content.split('\n')
-                new_lines = new_code.split('\n')
+
+                # Clean up new_code - preserve internal structure but remove outer empty lines
+                new_code_clean = new_code.strip('\n') if new_code else ""
+                new_lines = new_code_clean.split('\n') if new_code_clean else []
+
+                # For dedented/stripped matches, try to preserve the original indentation
+                if match_quality in ('dedented', 'stripped', 'fuzzy'):
+                    # Get the indentation of the first line being replaced
+                    original_line = content_lines[start_idx] if start_idx < len(content_lines) else ""
+                    original_indent = len(original_line) - len(original_line.lstrip())
+
+                    # Get the indentation of new code's first line
+                    first_new_line = new_lines[0] if new_lines else ""
+                    new_indent = len(first_new_line) - len(first_new_line.lstrip())
+
+                    # Adjust indentation if there's a difference
+                    indent_diff = original_indent - new_indent
+                    if indent_diff > 0:
+                        # Add indentation to new lines
+                        indent_str = ' ' * indent_diff
+                        new_lines = [indent_str + line if line.strip() else line for line in new_lines]
+                    elif indent_diff < 0:
+                        # Remove indentation from new lines (carefully)
+                        remove_indent = abs(indent_diff)
+                        adjusted_lines = []
+                        for line in new_lines:
+                            if line.startswith(' ' * remove_indent):
+                                adjusted_lines.append(line[remove_indent:])
+                            else:
+                                adjusted_lines.append(line)
+                        new_lines = adjusted_lines
+
                 updated_lines = content_lines[:start_idx] + new_lines + content_lines[end_idx:]
                 updated = '\n'.join(updated_lines)
 
@@ -213,44 +331,50 @@ class FileManager:
                 with open(full_path, "w", encoding="utf-8") as handle:
                     handle.write(updated)
 
-                stage = 2 if match_quality == 'normalized' else 3
                 self.edit_history.append(
-                    {"file": rel_path, "timestamp": time.time(), "action": "replace", "stage": stage}
+                    {"file": rel_path, "timestamp": time.time(), "action": "replace", "stage": match_quality}
                 )
                 _safe_print(f"   [~] Edited ({match_quality}): {rel_path}")
                 return True
 
-            # Stage 4: Proposed change file (PR-style fallback)
+            # Stage 6: Proposed change file (PR-style fallback)
             proposed_file = f"{rel_path}.proposed_change"
             proposed_path = self.base_path / proposed_file
 
             # Show debug info to help diagnose why match failed
-            old_preview = old_code[:200] + "..." if len(old_code) > 200 else old_code
+            old_preview = old_code_clean[:300].replace('\n', '\\n')
+            content_preview = content[:500].replace('\n', '\\n')
 
             proposal = f"""=== PROPOSED CHANGE ===
 File: {rel_path}
 Auto-applied: False (patch failed - manual review needed)
 
 --- OLD CODE (expected to find) ---
-{old_code}
+{old_code_clean}
 
 --- NEW CODE (to replace with) ---
 {new_code}
 
 --- DEBUG INFO ---
-File size: {len(content)} bytes
-Old code size: {len(old_code)} bytes
-Stages attempted: exact, normalized, fuzzy (80% threshold)
+File size: {len(content)} bytes, {len(content.split(chr(10)))} lines
+Old code size: {len(old_code_clean)} bytes, {len(old_code_clean.split(chr(10)))} lines
+Stages attempted: exact, normalized, dedented, stripped, fuzzy (65% threshold)
 All stages failed - content may have changed or old_code is incorrect.
 
-Tip: Copy the exact text from the file (including whitespace) into the 'old:' section.
+--- FIRST 500 CHARS OF FILE ---
+{content[:500]}
+
+--- Tip ---
+1. Copy the exact text from the file (including whitespace) into the 'old:' section
+2. Make sure line endings match (use Unix-style \\n)
+3. Check if the code has been modified since you last read it
 """
 
             with open(proposed_path, "w", encoding="utf-8") as handle:
                 handle.write(proposal)
 
             self.edit_history.append(
-                {"file": rel_path, "timestamp": time.time(), "action": "propose", "stage": 4}
+                {"file": rel_path, "timestamp": time.time(), "action": "propose", "stage": "fallback"}
             )
             _safe_print(f"   [?] Created proposal: {proposed_file} (manual review needed)")
             return False

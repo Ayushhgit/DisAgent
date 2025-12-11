@@ -101,6 +101,7 @@ class AgentContext:
     memory: Dict[str, str] = field(default_factory=dict)
     decisions: Dict[str, str] = field(default_factory=dict)
     scope_info: Dict[str, str] = field(default_factory=dict)
+    reasoning_info: Dict[str, Any] = field(default_factory=dict)  # Chain of thought reasoning
     architecture: str = ""
     file_structure: Dict[str, str] = field(default_factory=dict)
 
@@ -144,7 +145,28 @@ class AgentContext:
         if self.scope_info:
             context_parts.append("SCOPE INFORMATION:\n")
             for key, value in self.scope_info.items():
-                context_parts.append(f"  {key}: {value}\n")
+                if isinstance(value, list):
+                    context_parts.append(f"  {key}: {', '.join(str(v) for v in value)}\n")
+                elif isinstance(value, dict):
+                    context_parts.append(f"  {key}: {len(value)} items\n")
+                else:
+                    context_parts.append(f"  {key}: {value}\n")
+            context_parts.append("\n")
+
+        # CRITICAL: Include chain of thought reasoning for agents
+        if self.reasoning_info:
+            context_parts.append("REASONING & PLANNING (Chain of Thought):\n")
+            if self.reasoning_info.get('summary'):
+                context_parts.append(f"  Summary: {self.reasoning_info['summary']}\n")
+            if self.reasoning_info.get('key_points'):
+                context_parts.append("  Key Points:\n")
+                for point in self.reasoning_info.get('key_points', [])[:5]:
+                    context_parts.append(f"    - {point}\n")
+            if self.reasoning_info.get('steps'):
+                context_parts.append("  Planned Steps:\n")
+                for step in self.reasoning_info.get('steps', [])[:8]:
+                    step_title = step.get('title', step.get('detail', 'Unknown'))
+                    context_parts.append(f"    {step.get('id', '?')}: {step_title}\n")
             context_parts.append("\n")
 
         if self.architecture:
@@ -156,11 +178,14 @@ class AgentContext:
             recent_context = self.unified_memory.short_term.summarize_context()
             if recent_context and "No recent context" not in recent_context:
                 context_parts.append("RECENT MEMORY CONTEXT:\n")
-                context_parts.append(f"{recent_context[:500]}\n\n")
+                context_parts.append(f"{recent_context[:800]}\n\n")
 
-        for agent, result in self.memory.items():
-            truncated = result[:2000] if len(result) > 2000 else result
-            context_parts.append(f"[{agent}]:\n{truncated}\n\n---\n\n")
+        # Include previous agent outputs for context
+        if self.memory:
+            context_parts.append("PREVIOUS AGENT OUTPUTS:\n")
+            for agent, result in self.memory.items():
+                truncated = result[:1500] if len(result) > 1500 else result
+                context_parts.append(f"[{agent}]:\n{truncated}\n\n---\n\n")
 
         return "".join(context_parts)
 
@@ -174,6 +199,19 @@ class AgentContext:
                 agent_id="orchestrator",
                 decision="Scope analysis completed",
                 context=str(scope_dict),
+                priority=MemoryPriority.HIGH
+            )
+
+    def set_reasoning(self, reasoning_dict: Dict[str, Any]) -> None:
+        """Set chain of thought reasoning information"""
+        self.reasoning_info = reasoning_dict
+
+        # Update unified memory with reasoning info
+        if self.unified_memory:
+            self.unified_memory.short_term.add_decision(
+                agent_id="orchestrator",
+                decision=f"Planning reasoning: {reasoning_dict.get('summary', 'No summary')}",
+                context=str(reasoning_dict.get('steps', [])),
                 priority=MemoryPriority.HIGH
             )
 

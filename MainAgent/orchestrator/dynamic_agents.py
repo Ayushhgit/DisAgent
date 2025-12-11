@@ -10,6 +10,7 @@ from .context import AgentContext
 from .extractors import extract_and_apply_edits, extract_and_write_files
 from .file_manager import FileManager
 from core.runtime.llm import llm_call
+from core.memory.memory_types import MemoryPriority
 
 
 def create_dynamic_agent(
@@ -20,7 +21,34 @@ def create_dynamic_agent(
     file_manager: FileManager,
     allowed_files: Optional[List[str]] = None,
 ) -> str:
-    """Execute a dynamic agent prompt and materialize produced files."""
+    """Execute a dynamic agent prompt and materialize produced files.
+
+    This function:
+    1. Reads from shared memory to get relevant context
+    2. Builds a comprehensive prompt with project context
+    3. Executes the agent via LLM
+    4. Writes outputs back to shared memory
+    5. Applies file changes (creates/edits)
+    """
+
+    # STEP 1: Read from shared memory to get relevant context
+    memory_context = ""
+    if context.unified_memory:
+        # Get recent decisions and outputs from other agents
+        recent_memories = context.unified_memory.short_term.get_recent(n=5)
+        if recent_memories:
+            memory_context = "\n=== RECENT AGENT ACTIVITY (from shared memory) ===\n"
+            for mem in recent_memories:
+                if mem.agent_id != agent_name:  # Don't include our own past outputs
+                    memory_context += f"[{mem.agent_id}]: {mem.content[:300]}...\n\n"
+
+        # Get any relevant learnings from long-term memory
+        if context.unified_memory.long_term:
+            learnings = context.unified_memory.long_term.get_learnings(limit=3)
+            if learnings:
+                memory_context += "\n=== LEARNINGS FROM MEMORY ===\n"
+                for learning in learnings:
+                    memory_context += f"- {learning}\n"
 
     # Get project structure and file summaries
     project_structure = file_manager.get_project_structure_tree()
@@ -108,6 +136,7 @@ def create_dynamic_agent(
 
 === SHARED CONTEXT FROM PREVIOUS AGENTS ===
 {context.get_context()}
+{memory_context}
 
 === ORIGINAL USER REQUEST ===
 {user_request}
@@ -172,13 +201,36 @@ FILE ACCESS:
     except Exception as exc:
         print(f"   [ERROR] Error calling LLM: {exc}\n")
         output = ""
+        # Record error to memory
+        if context.unified_memory:
+            context.unified_memory.short_term.add_error(
+                agent_id=agent_name,
+                error=str(exc),
+                context="LLM call failed"
+            )
 
     if not output or len(output) < 50:
         print(f"   [WARN] Warning: {agent_name} produced minimal output")
 
+    # STEP 4: Write output to shared memory
     context.add_result(agent_name, output)
 
+    # Also record a decision summary if we have unified memory
+    if context.unified_memory and output:
+        # Extract a brief summary of what the agent did
+        summary = output[:500] if len(output) > 500 else output
+        context.unified_memory.short_term.add_decision(
+            agent_id=agent_name,
+            decision=f"Agent {agent_name} completed execution",
+            context=summary,
+            priority=MemoryPriority.HIGH
+        )
+
+    # STEP 5: Apply file changes
     print(f"\n   [PROCESSING] Processing {agent_name} output - creating/editing files...\n")
+    files_written = {}
+    edits_applied = {}
+
     try:
         files_written = extract_and_write_files(output, file_manager, agent_name)
         edits_applied = extract_and_apply_edits(output, file_manager, agent_name)
@@ -186,14 +238,43 @@ FILE ACCESS:
         print(f"   [ERROR] Error processing agent output: {exc}\n")
         import traceback
         traceback.print_exc()
-        files_written = {}
-        edits_applied = {}
+        # Record error to memory
+        if context.unified_memory:
+            context.unified_memory.short_term.add_error(
+                agent_id=agent_name,
+                error=str(exc),
+                context="File processing failed"
+            )
 
     if files_written:
         print(f"\n   [OK] Created {len(files_written)} new file(s)")
+        # Record files created to memory
+        for filename in files_written.keys():
+            if context.unified_memory:
+                content = file_manager.read_file(filename) or ""
+                context.unified_memory.short_term.add_code_context(
+                    agent_id=agent_name,
+                    filename=filename,
+                    content=content[:500],
+                    purpose="Created by agent"
+                )
+
     if edits_applied:
         successful = sum(1 for value in edits_applied.values() if value)
+        failed = len(edits_applied) - successful
         print(f"   [OK] Applied {successful} edit(s) to existing files")
+        if failed > 0:
+            print(f"   [WARN] {failed} edit(s) failed to apply")
+            # Record failed edits to memory for debugging
+            if context.unified_memory:
+                for filepath, success in edits_applied.items():
+                    if not success:
+                        context.unified_memory.short_term.add_error(
+                            agent_id=agent_name,
+                            error=f"Edit failed for {filepath}",
+                            context="Patch application failed - check .proposed_change file"
+                        )
+
     if not files_written and not edits_applied:
         print(f"\n   [WARN] WARNING: No file changes made by {agent_name}")
 

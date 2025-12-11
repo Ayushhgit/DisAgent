@@ -27,7 +27,7 @@ from core.planning.scope_analyzer import ScopeAnalyzer
 from core.planning.chain_of_thought import ChainOfThoughtProcessor
 from core.planning.validation import PlanValidator
 from core.context.state_tracker import StateTracker
-from core.memory.memory_types import TaskInfo, TaskType, AgentState
+from core.memory.memory_types import TaskInfo, TaskType, AgentState, MemoryPriority
 from core.runtime.llm import llm_call
 from core.runtime.agent import AgentResult, Agent
 from core.runtime.scheduler import TaskScheduler
@@ -137,7 +137,21 @@ class UnifiedOrchestrator:
             reasoning_steps = reasoning_result.get("steps", [])
             self.execution_stats["chain_of_thought"] = round(time.time() - cot_start, 2)
 
+            # CRITICAL: Store reasoning in context for agents to use
+            self.context.set_reasoning(reasoning_result)
+
+            # Also store in short-term memory for persistence
+            if self.context.unified_memory:
+                self.context.unified_memory.short_term.add_decision(
+                    agent_id="orchestrator",
+                    decision=f"Chain of thought analysis: {reasoning_result.get('summary', '')}",
+                    context=str(reasoning_steps),
+                    priority=MemoryPriority.HIGH
+                )
+
             print(f"Generated {len(reasoning_steps)} reasoning steps")
+            if reasoning_result.get('summary'):
+                print(f"Summary: {reasoning_result['summary'][:100]}...")
             print(f"Time: {self.execution_stats['chain_of_thought']}s\n")
 
             # ===== STAGE 3: PROMPT ENGINEERING =====
