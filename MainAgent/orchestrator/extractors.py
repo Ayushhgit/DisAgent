@@ -154,7 +154,11 @@ def _strip_outer_only(text: str) -> str:
     """Strip only the outer whitespace while preserving internal indentation.
 
     This removes leading/trailing blank lines but keeps indentation on content lines.
+    IMPORTANT: Preserves internal structure exactly as-is.
     """
+    if not text:
+        return ""
+
     lines = text.split('\n')
 
     # Find first non-empty line
@@ -175,73 +179,144 @@ def _strip_outer_only(text: str) -> str:
     return '\n'.join(result_lines)
 
 
+def _extract_code_block(text: str, start_marker: str) -> str:
+    """Extract code from a block, handling both inline and multi-line formats.
+
+    Handles formats like:
+    - old:\ncode here
+    - old: code here
+    - old:\n```\ncode\n```
+    """
+    if not text:
+        return ""
+
+    text = text.strip()
+
+    # If wrapped in code fences, extract content
+    if text.startswith('```'):
+        # Find the end of the code fence
+        lines = text.split('\n')
+        if len(lines) > 1:
+            # Skip first line (```language or just ```)
+            content_lines = []
+            for line in lines[1:]:
+                if line.strip() == '```':
+                    break
+                content_lines.append(line)
+            return '\n'.join(content_lines)
+
+    return text
+
+
 def extract_and_apply_edits(
     agent_output: str,
     file_manager: FileManager,
     agent_name: str,
 ) -> Dict[str, bool]:
-    """Extract edit instructions and apply them to the project files."""
+    """Extract edit instructions and apply them to the project files.
+
+    Supports multiple edit formats:
+    1. ===EDIT=== / ===END=== blocks
+    2. APPEND_TO: / END_APPEND blocks
+    3. Various whitespace and formatting variations
+    """
 
     edits_applied: Dict[str, bool] = {}
 
     # Normalize line endings in the entire output first
     agent_output = _normalize_line_endings(agent_output)
 
-    # Single unified pattern that handles all common ===EDIT=== variants
-    # This pattern is flexible enough to handle:
-    # - Standard format with newlines after old:/new:
-    # - Compact format where content starts on same line
-    # - Extra whitespace around markers
-    edit_pattern = r"""
-        ===\s*EDIT\s*===\s*\n                    # Opening marker
-        \s*file\s*:\s*([^\n]+?)\s*\n             # Capture filepath
-        \s*old\s*:\s*\n?                         # old: label (newline optional)
-        ([\s\S]*?)                               # Capture old code (non-greedy)
-        \n\s*new\s*:\s*\n?                       # new: label (newline optional)
-        ([\s\S]*?)                               # Capture new code (non-greedy)
-        \n\s*===\s*END\s*===                     # Closing marker
-    """
+    # Multiple patterns to handle different EDIT block formats
+    edit_patterns = [
+        # Pattern 1: Standard format with clear separators
+        r"""===\s*EDIT\s*===\s*\n
+            \s*file\s*:\s*([^\n]+?)\s*\n
+            \s*old\s*:\s*\n
+            ([\s\S]*?)
+            \n\s*new\s*:\s*\n
+            ([\s\S]*?)
+            \n\s*===\s*END\s*===""",
 
-    processed_edits = set()  # Track to avoid duplicate edits (by position in source)
-    processed_positions = set()  # Track by match position to avoid duplicates
+        # Pattern 2: Compact format (content on same line as old:/new:)
+        r"""===\s*EDIT\s*===\s*\n
+            \s*file\s*:\s*([^\n]+?)\s*\n
+            \s*old\s*:\s*
+            ([\s\S]*?)
+            \nnew\s*:\s*
+            ([\s\S]*?)
+            \n===\s*END\s*===""",
 
-    for match in re.finditer(edit_pattern, agent_output, re.IGNORECASE | re.MULTILINE | re.VERBOSE):
-        # Skip if we've already processed this position
-        if match.start() in processed_positions:
-            continue
-        processed_positions.add(match.start())
+        # Pattern 3: With code fences inside
+        r"""===\s*EDIT\s*===\s*\n
+            \s*file\s*:\s*([^\n]+?)\s*\n
+            \s*old\s*:\s*\n?
+            ```[^\n]*\n([\s\S]*?)```\s*\n
+            \s*new\s*:\s*\n?
+            ```[^\n]*\n([\s\S]*?)```\s*\n
+            \s*===\s*END\s*===""",
 
-        filepath = match.group(1).strip()
-        # Use _strip_outer_only to preserve indentation
-        old_code = _strip_outer_only(match.group(2))
-        new_code = _strip_outer_only(match.group(3))
+        # Pattern 4: Very lenient pattern as fallback
+        r"""===\s*EDIT\s*===.*?\n
+            .*?file\s*:\s*([^\n]+?)\s*\n
+            .*?old\s*:[ \t]*\n?([\s\S]*?)
+            \n.*?new\s*:[ \t]*\n?([\s\S]*?)
+            \n.*?===\s*END\s*===""",
+    ]
 
-        # Skip if we've already processed this exact edit
-        edit_key = f"{filepath}:{old_code}"
-        if edit_key in processed_edits:
-            continue
-        processed_edits.add(edit_key)
+    processed_edits = set()  # Track to avoid duplicate edits
+    processed_positions = set()  # Track by match position
 
-        if not filepath:
-            _safe_print(f"   [WARN] Skipping edit: no filepath specified")
-            continue
+    for pattern_idx, edit_pattern in enumerate(edit_patterns):
+        for match in re.finditer(edit_pattern, agent_output, re.IGNORECASE | re.MULTILINE | re.VERBOSE):
+            # Skip if we've already processed this position with any pattern
+            if match.start() in processed_positions:
+                continue
 
-        if not old_code:
-            _safe_print(f"   [WARN] Skipping edit for {filepath}: no old code specified")
-            continue
+            filepath = match.group(1).strip()
 
-        # new_code can be empty (deletion case)
-        _safe_print(f"   [EDIT] Attempting to edit: {filepath}")
-        _safe_print(f"      Old code length: {len(old_code)} chars, New code length: {len(new_code)} chars")
+            # Extract and clean old/new code
+            old_code_raw = match.group(2)
+            new_code_raw = match.group(3)
 
-        success = file_manager.edit_file(filepath, old_code, new_code)
-        edits_applied[filepath] = success
+            # Handle code fences if present
+            old_code = _extract_code_block(old_code_raw, "old") if '```' in old_code_raw else old_code_raw
+            new_code = _extract_code_block(new_code_raw, "new") if '```' in new_code_raw else new_code_raw
 
-        if not success:
-            _safe_print(f"   [WARN] Edit failed for {filepath}")
-            _safe_print(f"      Tip: Check if 'old' code matches file content exactly (including whitespace)")
+            # Clean up the code blocks
+            old_code = _strip_outer_only(old_code)
+            new_code = _strip_outer_only(new_code)
 
-    # Pattern 2: APPEND_TO format
+            # Create unique key for this edit
+            edit_key = f"{filepath}:{hash(old_code)}"
+            if edit_key in processed_edits:
+                continue
+            processed_edits.add(edit_key)
+            processed_positions.add(match.start())
+
+            if not filepath:
+                _safe_print(f"   [WARN] Skipping edit: no filepath specified")
+                continue
+
+            if not old_code:
+                _safe_print(f"   [WARN] Skipping edit for {filepath}: no old code specified")
+                continue
+
+            # new_code can be empty (deletion case)
+            _safe_print(f"   [EDIT] Attempting to edit: {filepath}")
+            _safe_print(f"      Pattern: {pattern_idx + 1}, Old: {len(old_code)} chars, New: {len(new_code)} chars")
+
+            # Debug: Show first few chars of old code being searched
+            old_preview = old_code[:80].replace('\n', '\\n') if old_code else "(empty)"
+            _safe_print(f"      Looking for: {old_preview}...")
+
+            success = file_manager.edit_file(filepath, old_code, new_code)
+            edits_applied[filepath] = success
+
+            if not success:
+                _safe_print(f"   [WARN] Edit failed for {filepath}")
+                _safe_print(f"      Tip: Check .proposed_change file for manual review")
+
+    # Pattern for APPEND_TO format
     append_pattern = r"APPEND_TO:\s*([^\n]+)\s*\n([\s\S]*?)\nEND_APPEND"
     for match in re.finditer(append_pattern, agent_output, re.IGNORECASE | re.MULTILINE):
         filepath = match.group(1).strip()
@@ -253,6 +328,20 @@ def extract_and_apply_edits(
         _safe_print(f"   [APPEND] Attempting to append to: {filepath}")
         success = file_manager.append_to_file(filepath, content)
         edits_applied[f"{filepath}_append"] = success
+
+    # Also look for INSERT_AT patterns
+    insert_pattern = r"INSERT_AT:\s*([^\n]+)\s*line\s*:\s*(\d+)\s*\n([\s\S]*?)\nEND_INSERT"
+    for match in re.finditer(insert_pattern, agent_output, re.IGNORECASE | re.MULTILINE):
+        filepath = match.group(1).strip()
+        line_num = int(match.group(2))
+        content = _strip_outer_only(match.group(3))
+
+        if not filepath or not content:
+            continue
+
+        _safe_print(f"   [INSERT] Attempting to insert at line {line_num} in: {filepath}")
+        success = file_manager.insert_at_line(filepath, line_num, content)
+        edits_applied[f"{filepath}_insert_{line_num}"] = success
 
     return edits_applied
 
