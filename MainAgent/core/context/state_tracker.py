@@ -8,6 +8,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import threading
+from collections import defaultdict
 
 from core.memory.memory_types import (
     AgentState,
@@ -19,6 +20,14 @@ from core.memory.memory_types import (
 from core.runtime.event_bus import EventType, publish_event
 
 
+class CycleDetectedError(Exception):
+    """Raised when a dependency cycle is detected."""
+    def __init__(self, cycle: List[str]):
+        self.cycle = cycle
+        cycle_str = " -> ".join(cycle + [cycle[0]])
+        super().__init__(f"Dependency cycle detected: {cycle_str}")
+
+
 class StateTracker:
     """
     Tracks:
@@ -26,8 +35,9 @@ class StateTracker:
     - Task assignment and completion
     - Dependencies and blockers
     - System-wide execution flow
-    
-    Thread-safe with locks around state mutations.
+
+    Thread-safe with RLock around all state mutations.
+    Includes cycle detection and reverse dependency index for O(1) lookups.
     """
 
     def __init__(self, main_agent_id: str = "main_agent", storage_path: Optional[str] = None):
@@ -37,14 +47,73 @@ class StateTracker:
         self.tasks: Dict[str, TaskInfo] = {}
         self.task_queue: List[str] = []
         self.task_dependencies: Dict[str, Set[str]] = {}  # task_id -> dependencies
+        # Reverse index: dependency -> tasks that depend on it (for O(1) unblock checks)
+        self._reverse_dependencies: Dict[str, Set[str]] = defaultdict(set)
         self.state_history: List[StateSnapshot] = []
         self.global_blockers: List[str] = []
-        
-        # Thread safety
+
+        # Thread safety - single RLock for all state operations
         self._lock = threading.RLock()
 
         # Initialize main agent
         self.register_agent(main_agent_id)
+
+    def _would_create_cycle(self, task_id: str, new_deps: Set[str]) -> Optional[List[str]]:
+        """
+        Check if adding dependencies would create a cycle.
+        Returns the cycle path if found, None otherwise.
+        Must be called with lock held.
+        """
+        if not new_deps:
+            return None
+
+        # DFS to check for cycles
+        visited: Set[str] = set()
+        rec_stack: Set[str] = set()
+        path: List[str] = []
+
+        def dfs(node: str) -> Optional[List[str]]:
+            if node in rec_stack:
+                # Found cycle - extract path
+                cycle_start = path.index(node) if node in path else 0
+                return path[cycle_start:]
+
+            if node in visited:
+                return None
+
+            visited.add(node)
+            rec_stack.add(node)
+            path.append(node)
+
+            # Get dependencies for this node
+            if node == task_id:
+                deps = new_deps
+            else:
+                deps = self.task_dependencies.get(node, set())
+
+            for dep in deps:
+                cycle = dfs(dep)
+                if cycle:
+                    return cycle
+
+            path.pop()
+            rec_stack.remove(node)
+            return None
+
+        return dfs(task_id)
+
+    def _update_reverse_index(self, task_id: str, old_deps: Set[str], new_deps: Set[str]) -> None:
+        """Update the reverse dependency index. Must be called with lock held."""
+        # Remove from old dependencies
+        for dep in old_deps - new_deps:
+            if dep in self._reverse_dependencies:
+                self._reverse_dependencies[dep].discard(task_id)
+                if not self._reverse_dependencies[dep]:
+                    del self._reverse_dependencies[dep]
+
+        # Add to new dependencies
+        for dep in new_deps - old_deps:
+            self._reverse_dependencies[dep].add(task_id)
 
     def register_agent(self, agent_id: str, metadata: Optional[Dict[str, Any]] = None):
         """Register a new agent"""
@@ -63,15 +132,36 @@ class StateTracker:
                     data={"metadata": metadata or {}}
                 )
 
-    def create_task(self, task: TaskInfo) -> str:
-        """Create and queue a new task"""
+    def create_task(self, task: TaskInfo, validate_cycles: bool = True) -> str:
+        """Create and queue a new task.
+
+        Args:
+            task: TaskInfo object to create
+            validate_cycles: If True, check for dependency cycles before adding
+
+        Returns:
+            The task_id of the created task
+
+        Raises:
+            CycleDetectedError: If adding this task would create a dependency cycle
+        """
         with self._lock:
+            new_deps = set(task.dependencies) if task.dependencies else set()
+
+            # Check for cycles before adding
+            if validate_cycles and new_deps:
+                cycle = self._would_create_cycle(task.task_id, new_deps)
+                if cycle:
+                    raise CycleDetectedError(cycle)
+
             self.tasks[task.task_id] = task
             self.task_queue.append(task.task_id)
 
-            # Track dependencies
-            if task.dependencies:
-                self.task_dependencies[task.task_id] = set(task.dependencies)
+            # Track dependencies and update reverse index
+            if new_deps:
+                old_deps = self.task_dependencies.get(task.task_id, set())
+                self.task_dependencies[task.task_id] = new_deps
+                self._update_reverse_index(task.task_id, old_deps, new_deps)
 
             # Publish event
             publish_event(
@@ -276,36 +366,40 @@ class StateTracker:
                 self.agents[agent_id].state = state
                 self.agents[agent_id].last_activity = datetime.now()
 
-    def take_snapshot(self):
-        """Record current system state"""
-        snapshot = StateSnapshot(
-            timestamp=datetime.now(),
-            active_agents=[
-                aid for aid, a in self.agents.items()
-                if a.state == AgentState.EXECUTING
-            ],
-            task_queue_size=len(self.task_queue),
-            completed_tasks=len([t for t in self.tasks.values() if t.status == AgentState.COMPLETED]),
-            blocked_agents=[
-                aid for aid, a in self.agents.items()
-                if a.state == AgentState.BLOCKED
-            ],
-            system_state=self._get_system_state_summary()
-        )
-        self.state_history.append(snapshot)
+    def take_snapshot(self) -> StateSnapshot:
+        """Record current system state (thread-safe)."""
+        with self._lock:
+            snapshot = StateSnapshot(
+                timestamp=datetime.now(),
+                active_agents=[
+                    aid for aid, a in self.agents.items()
+                    if a.state == AgentState.EXECUTING
+                ],
+                task_queue_size=len(self.task_queue),
+                completed_tasks=len([t for t in self.tasks.values() if t.status == AgentState.COMPLETED]),
+                blocked_agents=[
+                    aid for aid, a in self.agents.items()
+                    if a.state == AgentState.BLOCKED
+                ],
+                system_state=self._get_system_state_summary()
+            )
+            self.state_history.append(snapshot)
+            return snapshot
 
     def get_system_summary(self) -> str:
-        """Generate comprehensive system status summary"""
-        total_agents = len(self.agents)
-        idle_agents = len(self.get_available_agents())
-        blocked = len(self.get_blocked_agents())
+        """Generate comprehensive system status summary (thread-safe)."""
+        with self._lock:
+            total_agents = len(self.agents)
+            idle_agents = len([a for a in self.agents.values() if a.state == AgentState.IDLE])
+            blocked_agents = [a for a in self.agents.values() if a.state == AgentState.BLOCKED]
+            blocked = len(blocked_agents)
 
-        total_tasks = len(self.tasks)
-        completed = len([t for t in self.tasks.values() if t.status == AgentState.COMPLETED])
-        failed = len([t for t in self.tasks.values() if t.status == AgentState.FAILED])
-        queued = len(self.task_queue)
+            total_tasks = len(self.tasks)
+            completed = len([t for t in self.tasks.values() if t.status == AgentState.COMPLETED])
+            failed = len([t for t in self.tasks.values() if t.status == AgentState.FAILED])
+            queued = len(self.task_queue)
 
-        summary = f"""
+            summary = f"""
 === SYSTEM STATE SUMMARY ===
 Timestamp: {datetime.now()}
 
@@ -322,30 +416,33 @@ TASKS ({total_tasks} total):
 
 BLOCKERS:
 """
-        for agent in self.get_blocked_agents():
-            summary += f"  - {agent.agent_id}: {', '.join(agent.blockers)}\n"
+            for agent in blocked_agents:
+                summary += f"  - {agent.agent_id}: {', '.join(agent.blockers)}\n"
 
-        if self.global_blockers:
-            summary += f"\nGLOBAL BLOCKERS: {', '.join(self.global_blockers)}\n"
+            if self.global_blockers:
+                summary += f"\nGLOBAL BLOCKERS: {', '.join(self.global_blockers)}\n"
 
-        return summary
+            return summary
 
     def get_agent_history(self, agent_id: str) -> List[TaskInfo]:
-        """Get task history for an agent"""
-        return [
-            task for task in self.tasks.values()
-            if task.assigned_agent == agent_id
-        ]
+        """Get task history for an agent (thread-safe)."""
+        with self._lock:
+            return [
+                task for task in self.tasks.values()
+                if task.assigned_agent == agent_id
+            ]
 
-    def add_global_blocker(self, blocker: str):
-        """Add a global blocker"""
-        if blocker not in self.global_blockers:
-            self.global_blockers.append(blocker)
+    def add_global_blocker(self, blocker: str) -> None:
+        """Add a global blocker (thread-safe)."""
+        with self._lock:
+            if blocker not in self.global_blockers:
+                self.global_blockers.append(blocker)
 
-    def remove_global_blocker(self, blocker: str):
-        """Remove a global blocker"""
-        if blocker in self.global_blockers:
-            self.global_blockers.remove(blocker)
+    def remove_global_blocker(self, blocker: str) -> None:
+        """Remove a global blocker (thread-safe)."""
+        with self._lock:
+            if blocker in self.global_blockers:
+                self.global_blockers.remove(blocker)
 
     def _dependencies_met(self, task_id: str) -> bool:
         """Check if all task dependencies are completed"""
@@ -360,12 +457,19 @@ BLOCKERS:
 
         return True
 
-    def _check_unblocked_tasks(self, completed_task_id: str):
-        """Check which tasks are now unblocked"""
-        for task_id, deps in self.task_dependencies.items():
-            if completed_task_id in deps and self._dependencies_met(task_id):
-                # Task is now ready - could trigger notification here
-                pass
+    def _check_unblocked_tasks(self, completed_task_id: str) -> List[str]:
+        """Check which tasks are now unblocked using reverse index.
+
+        Returns list of newly ready task IDs.
+        Must be called with lock held.
+        """
+        newly_ready = []
+        # Use reverse index for O(1) lookup instead of O(n) scan
+        dependent_tasks = self._reverse_dependencies.get(completed_task_id, set())
+        for task_id in dependent_tasks:
+            if self._dependencies_met(task_id):
+                newly_ready.append(task_id)
+        return newly_ready
 
     def _get_system_state_summary(self) -> str:
         """Get brief system state"""

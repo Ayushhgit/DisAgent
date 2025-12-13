@@ -1,13 +1,28 @@
-"""Utility helpers for creating and editing files during orchestration."""
+"""Utility helpers for creating and editing files during orchestration.
+
+Features:
+- Thread-safe file operations with RLock
+- Transaction support with rollback capability
+- Edit history tracking
+- Automatic backup before modifications
+"""
 
 from __future__ import annotations
 
 import os
 import sys
 import time
+import shutil
 import threading
+import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass, field
+from datetime import datetime
+from contextlib import contextmanager
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_print(text: str) -> None:
@@ -20,21 +35,248 @@ def _safe_print(text: str) -> None:
         print(safe_text)
 
 
+@dataclass
+class FileSnapshot:
+    """Snapshot of a file for rollback purposes."""
+    rel_path: str
+    content: Optional[str]  # None means file didn't exist
+    timestamp: float = field(default_factory=time.time)
+    existed: bool = True
+
+
+@dataclass
+class Transaction:
+    """Represents a file operation transaction."""
+    id: str
+    snapshots: Dict[str, FileSnapshot] = field(default_factory=dict)
+    operations: List[Dict[str, Any]] = field(default_factory=list)
+    started_at: float = field(default_factory=time.time)
+    committed: bool = False
+    rolled_back: bool = False
+
+
 class FileManager:
     """Handles file system interactions for generated projects.
-    
+
     Thread-safe file operations with locking around writes and edits.
+    Supports transactions with rollback capability.
     """
 
-    def __init__(self, base_path: str):
+    def __init__(self, base_path: str, enable_backups: bool = True, max_backups: int = 10):
         self.base_path = Path(base_path)
         self.created_files: List[str] = []
         self.created_dirs: List[str] = []
         self.edit_history: List[dict] = []
         self._lock = threading.RLock()
 
+        # Transaction support
+        self._current_transaction: Optional[Transaction] = None
+        self._transaction_lock = threading.RLock()
+
+        # Backup configuration
+        self.enable_backups = enable_backups
+        self.max_backups = max_backups
+        self._backup_dir = self.base_path / ".backups"
+
         self.base_path.mkdir(parents=True, exist_ok=True)
         _safe_print(f"[DIR] Project folder: {self.base_path.absolute()}\n")
+
+    @contextmanager
+    def transaction(self, transaction_id: Optional[str] = None):
+        """Context manager for file operations transaction.
+
+        Usage:
+            with file_manager.transaction("my_edit") as txn:
+                file_manager.write_file("test.py", "content")
+                file_manager.edit_file("other.py", old, new)
+                # If exception occurs, all changes are rolled back
+
+        Args:
+            transaction_id: Optional identifier for the transaction
+        """
+        txn_id = transaction_id or f"txn_{int(time.time() * 1000)}"
+
+        with self._transaction_lock:
+            if self._current_transaction is not None:
+                raise RuntimeError("Nested transactions are not supported")
+
+            self._current_transaction = Transaction(id=txn_id)
+
+        try:
+            yield self._current_transaction
+            # Commit on successful completion
+            with self._transaction_lock:
+                if self._current_transaction:
+                    self._current_transaction.committed = True
+                    _safe_print(f"   [✓] Transaction {txn_id} committed")
+        except Exception as e:
+            # Rollback on exception
+            self.rollback()
+            raise
+        finally:
+            with self._transaction_lock:
+                self._current_transaction = None
+
+    def _snapshot_file(self, rel_path: str) -> FileSnapshot:
+        """Create a snapshot of a file before modification."""
+        content = self.read_file(rel_path)
+        return FileSnapshot(
+            rel_path=rel_path,
+            content=content,
+            existed=content is not None
+        )
+
+    def _record_operation(self, rel_path: str, operation: str, backup: bool = True):
+        """Record an operation for potential rollback."""
+        with self._transaction_lock:
+            if self._current_transaction is not None:
+                # Take snapshot if not already taken
+                if rel_path not in self._current_transaction.snapshots:
+                    if backup:
+                        self._current_transaction.snapshots[rel_path] = self._snapshot_file(rel_path)
+                self._current_transaction.operations.append({
+                    "rel_path": rel_path,
+                    "operation": operation,
+                    "timestamp": time.time()
+                })
+
+    def rollback(self) -> bool:
+        """Rollback all changes in the current transaction.
+
+        Returns:
+            True if rollback was successful, False otherwise
+        """
+        with self._transaction_lock:
+            if self._current_transaction is None:
+                logger.warning("No active transaction to rollback")
+                return False
+
+            if self._current_transaction.rolled_back:
+                return True
+
+            txn = self._current_transaction
+            _safe_print(f"   [!] Rolling back transaction {txn.id}...")
+
+            success = True
+            for rel_path, snapshot in txn.snapshots.items():
+                try:
+                    full_path = self.base_path / rel_path
+
+                    if snapshot.existed and snapshot.content is not None:
+                        # Restore original content
+                        full_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(full_path, "w", encoding="utf-8") as f:
+                            f.write(snapshot.content)
+                        _safe_print(f"   [←] Restored: {rel_path}")
+                    elif not snapshot.existed:
+                        # File didn't exist before, delete it
+                        if full_path.exists():
+                            full_path.unlink()
+                            _safe_print(f"   [×] Removed: {rel_path}")
+                except Exception as e:
+                    logger.exception(f"Failed to rollback {rel_path}: {e}")
+                    success = False
+
+            txn.rolled_back = True
+            return success
+
+    def create_backup(self, rel_path: str) -> Optional[str]:
+        """Create a backup of a file before modification.
+
+        Returns:
+            Path to backup file, or None if backup disabled/failed
+        """
+        if not self.enable_backups:
+            return None
+
+        with self._lock:
+            full_path = self.base_path / rel_path
+            if not full_path.exists():
+                return None
+
+            try:
+                self._backup_dir.mkdir(parents=True, exist_ok=True)
+
+                # Create timestamped backup filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_name = f"{rel_path.replace('/', '_').replace(os.sep, '_')}_{timestamp}.bak"
+                backup_path = self._backup_dir / backup_name
+
+                shutil.copy2(full_path, backup_path)
+
+                # Cleanup old backups
+                self._cleanup_old_backups(rel_path)
+
+                return str(backup_path)
+            except Exception as e:
+                logger.warning(f"Failed to create backup for {rel_path}: {e}")
+                return None
+
+    def _cleanup_old_backups(self, rel_path: str):
+        """Remove old backups beyond max_backups limit."""
+        try:
+            prefix = rel_path.replace('/', '_').replace(os.sep, '_')
+            backups = sorted(
+                [f for f in self._backup_dir.glob(f"{prefix}_*.bak")],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )
+
+            for old_backup in backups[self.max_backups:]:
+                old_backup.unlink()
+        except Exception as e:
+            logger.warning(f"Failed to cleanup old backups: {e}")
+
+    def restore_from_backup(self, rel_path: str, backup_index: int = 0) -> bool:
+        """Restore a file from backup.
+
+        Args:
+            rel_path: Relative path to file
+            backup_index: 0 = most recent, 1 = second most recent, etc.
+
+        Returns:
+            True if restoration successful
+        """
+        with self._lock:
+            try:
+                prefix = rel_path.replace('/', '_').replace(os.sep, '_')
+                backups = sorted(
+                    [f for f in self._backup_dir.glob(f"{prefix}_*.bak")],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True
+                )
+
+                if backup_index >= len(backups):
+                    _safe_print(f"   [!] No backup at index {backup_index} for {rel_path}")
+                    return False
+
+                backup_file = backups[backup_index]
+                full_path = self.base_path / rel_path
+
+                shutil.copy2(backup_file, full_path)
+                _safe_print(f"   [←] Restored {rel_path} from backup")
+                return True
+            except Exception as e:
+                logger.exception(f"Failed to restore {rel_path}: {e}")
+                return False
+
+    def list_backups(self, rel_path: str) -> List[Dict[str, Any]]:
+        """List available backups for a file."""
+        prefix = rel_path.replace('/', '_').replace(os.sep, '_')
+        backups = sorted(
+            [f for f in self._backup_dir.glob(f"{prefix}_*.bak") if f.exists()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )
+
+        return [
+            {
+                "path": str(b),
+                "timestamp": datetime.fromtimestamp(b.stat().st_mtime).isoformat(),
+                "size": b.stat().st_size
+            }
+            for b in backups
+        ]
 
     def create_directory(self, rel_path: str) -> Path:
         """Create a directory (thread-safe)."""
@@ -47,9 +289,17 @@ class FileManager:
             return full_path
 
     def write_file(self, rel_path: str, content: str) -> Path:
-        """Write file content (thread-safe)."""
+        """Write file content (thread-safe, with transaction support)."""
+        # Record operation for potential rollback
+        self._record_operation(rel_path, "write")
+
         with self._lock:
             full_path = self.base_path / rel_path
+
+            # Create backup if file exists
+            if full_path.exists():
+                self.create_backup(rel_path)
+
             full_path.parent.mkdir(parents=True, exist_ok=True)
             with open(full_path, "w", encoding="utf-8") as handle:
                 handle.write(content)
@@ -65,8 +315,16 @@ class FileManager:
             full_path = self.base_path / rel_path
             if not full_path.exists():
                 return None
-            with open(full_path, "r", encoding="utf-8") as handle:
-                return handle.read()
+            try:
+                with open(full_path, "r", encoding="utf-8") as handle:
+                    return handle.read()
+            except UnicodeDecodeError:
+                # Try with different encoding
+                try:
+                    with open(full_path, "r", encoding="latin-1") as handle:
+                        return handle.read()
+                except Exception:
+                    return None
 
     def _normalize_for_comparison(self, text: str) -> str:
         """Normalize text for comparison by handling line endings and trailing whitespace."""
@@ -245,6 +503,9 @@ class FileManager:
         5. Fuzzy match (65%+ similarity)
         6. Fallback: Create .proposed_change file for manual review
         """
+        # Record operation for potential rollback
+        self._record_operation(rel_path, "edit")
+
         with self._lock:
             content = self.read_file(rel_path)
             if content is None:
