@@ -6,9 +6,14 @@ This orchestrator integrates:
   - memory system: unified context management
   - verification loop: closed-loop validation with test runner
   - agent communication: point-to-point and channel-based messaging
+  - critic agent: output review before acceptance
+  - adaptive planner: re-planning on failure
+  - conflict resolver: concurrent edit merging
+  - experience learner: incremental learning from history
+  - execution tracer: structured observability
 
 Architecture:
-  User Request → Scope Analysis → Task Planning → Agent Execution → Verification → Integration
+  User Request → Scope Analysis → Task Planning → Agent Execution → Critic Review → Verification → Integration
 """
 
 from __future__ import annotations
@@ -23,16 +28,21 @@ from .context import AgentContext, create_context
 from .dynamic_agents import create_dynamic_agent
 from .file_manager import FileManager
 from .scope_prompting import prompt_engineer_agent
+from .execution_tracer import ExecutionTracer, SpanKind, create_tracer
 
 from core.planning.task_planner import TaskPlanner
 from core.planning.scope_analyzer import ScopeAnalyzer
 from core.planning.chain_of_thought import ChainOfThoughtProcessor
 from core.planning.validation import PlanValidator
+from core.planning.adaptive_planner import AdaptivePlanner, create_adaptive_planner
 from core.context.state_tracker import StateTracker
 from core.memory.memory_types import TaskInfo, TaskType, AgentState, MemoryPriority
+from core.memory.experience_learner import ExperienceLearner, create_experience_learner
 from core.runtime.llm import llm_call
 from core.runtime.agent import AgentResult, Agent
 from core.runtime.scheduler import TaskScheduler
+from core.runtime.critic import CriticAgent, create_critic, ApprovalStatus
+from core.runtime.conflict_resolver import ConflictResolver, create_conflict_resolver
 
 # New research-driven components
 from core.runtime.verification_loop import (
@@ -116,8 +126,12 @@ class UnifiedOrchestrator:
         output_folder: str = "./generated_project",
         enable_verification: bool = True,
         enable_semantic_analysis: bool = True,
+        enable_critic: bool = True,
+        enable_tracing: bool = True,
+        enable_learning: bool = True,
         run_tests: bool = True,
-        max_verification_retries: int = 3
+        max_verification_retries: int = 3,
+        critic_strictness: str = "normal"
     ):
         """Initialize the orchestrator with file manager and state tracking.
 
@@ -125,8 +139,12 @@ class UnifiedOrchestrator:
             output_folder: Base output directory for generated files
             enable_verification: Whether to run verification loop on edits
             enable_semantic_analysis: Whether to use LLM-powered scope analysis
+            enable_critic: Whether to enable critic agent for output review
+            enable_tracing: Whether to enable execution tracing
+            enable_learning: Whether to enable experience learning
             run_tests: Whether to run tests during verification
             max_verification_retries: Max retries for verification failures
+            critic_strictness: Strictness level for critic ("lenient", "normal", "strict")
         """
         self.output_folder = output_folder
         self.file_manager = FileManager(output_folder)
@@ -140,6 +158,18 @@ class UnifiedOrchestrator:
         # Configuration
         self.enable_verification = enable_verification
         self.enable_semantic_analysis = enable_semantic_analysis
+        self.enable_critic = enable_critic
+        self.enable_tracing = enable_tracing
+        self.enable_learning = enable_learning
+
+        # Initialize execution tracer
+        if enable_tracing:
+            self.tracer = create_tracer(
+                storage_path=f".agent_memory/traces/{self.project_name}",
+                enable_console=True
+            )
+        else:
+            self.tracer = None
 
         # Initialize verification loop
         if enable_verification:
@@ -156,6 +186,30 @@ class UnifiedOrchestrator:
             )
         else:
             self.verification_loop = None
+
+        # Initialize critic agent
+        if enable_critic:
+            def llm_wrapper(prompt: str, max_tokens: Optional[int] = None) -> str:
+                return llm_call(prompt, max_tokens=max_tokens or 2000)
+            self.critic = create_critic(llm_wrapper, strictness=critic_strictness)
+        else:
+            self.critic = None
+
+        # Initialize adaptive planner
+        def llm_wrapper_adaptive(prompt: str, max_tokens: Optional[int] = None) -> str:
+            return llm_call(prompt, max_tokens=max_tokens or 1500)
+        self.adaptive_planner = create_adaptive_planner(llm_wrapper_adaptive)
+
+        # Initialize conflict resolver
+        self.conflict_resolver = create_conflict_resolver(llm_wrapper_adaptive)
+
+        # Initialize experience learner
+        if enable_learning:
+            self.experience_learner = create_experience_learner(
+                storage_path=f".agent_memory/experience/{self.project_name}"
+            )
+        else:
+            self.experience_learner = None
 
         # Initialize agent communication bus
         self.communication_bus = get_communication_bus()
@@ -444,8 +498,47 @@ Keep it under 1000 words."""
         print(f"   - Successful: {comm_stats.get('successful_deliveries', 0)}")
         print(f"   - Failed: {comm_stats.get('failed_deliveries', 0)}")
 
+        # Critic statistics
+        if self.critic:
+            print("\n[CRITIC] Code Review Statistics:")
+            critic_stats = self.critic.get_stats()
+            print(f"   - Total reviews: {critic_stats.get('total_reviews', 0)}")
+            print(f"   - Approved: {critic_stats.get('approved', 0)}")
+            print(f"   - Rejected: {critic_stats.get('rejected', 0)}")
+            print(f"   - Average score: {critic_stats.get('average_score', 0):.2f}")
+
+        # Adaptive planner statistics
+        print("\n[PLANNING] Adaptive Planner Statistics:")
+        planner_stats = self.adaptive_planner.get_stats()
+        print(f"   - Total executions: {planner_stats.get('total_executions', 0)}")
+        print(f"   - Successful: {planner_stats.get('successful', 0)}")
+        print(f"   - Failed: {planner_stats.get('failed', 0)}")
+        print(f"   - Total retries: {planner_stats.get('total_retries', 0)}")
+
+        # Conflict resolver statistics
+        print("\n[CONFLICTS] Conflict Resolution Statistics:")
+        conflict_stats = self.conflict_resolver.get_stats()
+        print(f"   - Total resolutions: {conflict_stats.get('total_resolutions', 0)}")
+        print(f"   - Successful: {conflict_stats.get('successful', 0)}")
+        print(f"   - Failed: {conflict_stats.get('failed', 0)}")
+
+        # Experience learner statistics
+        if self.experience_learner:
+            print("\n[LEARNING] Experience Learning Statistics:")
+            learning_summary = self.experience_learner.get_learning_summary()
+            print(f"   - Total experiences: {learning_summary.get('total_experiences', 0)}")
+            print(f"   - Agents tracked: {learning_summary.get('agents_tracked', 0)}")
+            print(f"   - Failure patterns: {learning_summary.get('failure_patterns_identified', 0)}")
+            print(f"   - Task types learned: {learning_summary.get('task_types_learned', 0)}")
+
         print("\n[STATE] System State:")
         print(self.state_tracker.get_system_summary())
+
+        # Print trace summary if tracing enabled
+        if self.tracer:
+            self.tracer.print_summary()
+            trace_path = self.tracer.save_trace()
+            print(f"Trace saved to: {trace_path}")
 
         print("\n" + "=" * 80)
         print("FINAL SUMMARY")
@@ -466,7 +559,11 @@ def orchestrator(
     output_folder: str = "./generated_project",
     enable_verification: bool = True,
     enable_semantic_analysis: bool = True,
-    run_tests: bool = True
+    enable_critic: bool = True,
+    enable_tracing: bool = True,
+    enable_learning: bool = True,
+    run_tests: bool = True,
+    critic_strictness: str = "normal"
 ) -> None:
     """Run the unified orchestrator with planning + execution.
 
@@ -475,12 +572,20 @@ def orchestrator(
         output_folder: Output directory for generated files
         enable_verification: Whether to run verification loop on edits
         enable_semantic_analysis: Whether to use LLM-powered scope analysis
+        enable_critic: Whether to enable critic agent for output review
+        enable_tracing: Whether to enable execution tracing
+        enable_learning: Whether to enable experience learning
         run_tests: Whether to run tests during verification
+        critic_strictness: Strictness level for critic ("lenient", "normal", "strict")
     """
     unified_orchestrator = UnifiedOrchestrator(
         output_folder,
         enable_verification=enable_verification,
         enable_semantic_analysis=enable_semantic_analysis,
-        run_tests=run_tests
+        enable_critic=enable_critic,
+        enable_tracing=enable_tracing,
+        enable_learning=enable_learning,
+        run_tests=run_tests,
+        critic_strictness=critic_strictness
     )
     unified_orchestrator.run(user_request)
