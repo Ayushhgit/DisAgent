@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from abc import ABC, abstractmethod
 import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+import inspect
 
 logger = logging.getLogger(__name__)
 
@@ -63,47 +67,55 @@ class EventHandler(ABC):
 
 class EventBus:
     """Internal pub/sub event bus for orchestrator communication.
-    
+
     Features:
       - Subscribe/publish pattern
-      - Synchronous and asynchronous handlers
-      - Thread-safe operations
-      - Event history tracking
+      - Synchronous and asynchronous handlers (properly awaited)
+      - Thread-safe operations with fine-grained locking
+      - Efficient ring buffer event history
       - Filtering and priority handling
     """
 
-    def __init__(self, max_history: int = 1000):
+    def __init__(self, max_history: int = 1000, async_executor_workers: int = 4):
         """Initialize the event bus.
-        
+
         Args:
             max_history: Maximum events to keep in history
+            async_executor_workers: Number of workers for async handler execution
         """
         self.max_history = max_history
         self._subscribers: Dict[EventType, List[Callable]] = {}
-        self._event_history: List[Event] = []
+        # Use deque for O(1) append and automatic size limiting
+        self._event_history: deque = deque(maxlen=max_history)
         self._lock = threading.RLock()
+        self._subscriber_lock = threading.RLock()
+        # Executor for running async handlers
+        self._async_executor = ThreadPoolExecutor(max_workers=async_executor_workers)
+        # Track if we have an event loop available
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
 
     def subscribe(self, event_type: EventType, handler: Callable) -> None:
         """Subscribe to events of a specific type.
-        
+
         Args:
             event_type: Type of event to subscribe to
-            handler: Callable(event) to handle the event
+            handler: Callable(event) to handle the event (sync or async)
         """
-        with self._lock:
+        with self._subscriber_lock:
             if event_type not in self._subscribers:
                 self._subscribers[event_type] = []
-            self._subscribers[event_type].append(handler)
-            logger.debug(f"Handler subscribed to {event_type.value}")
+            if handler not in self._subscribers[event_type]:
+                self._subscribers[event_type].append(handler)
+                logger.debug(f"Handler subscribed to {event_type.value}")
 
     def unsubscribe(self, event_type: EventType, handler: Callable) -> None:
         """Unsubscribe a handler.
-        
+
         Args:
             event_type: Type of event
             handler: Handler to remove
         """
-        with self._lock:
+        with self._subscriber_lock:
             if event_type in self._subscribers:
                 try:
                     self._subscribers[event_type].remove(handler)
@@ -111,30 +123,44 @@ class EventBus:
                 except ValueError:
                     pass
 
+    def _run_async_handler(self, handler: Callable, event: Event) -> None:
+        """Run an async handler in a new event loop.
+
+        Args:
+            handler: Async handler function
+            event: Event to pass to handler
+        """
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(handler(event))
+            finally:
+                loop.close()
+        except Exception as exc:
+            logger.exception(f"Error in async event handler: {exc}")
+
     def publish(self, event: Event) -> None:
         """Publish an event to all subscribers.
-        
+
         Args:
             event: Event to publish
         """
+        # Store in history (deque handles max size automatically)
         with self._lock:
-            # Store in history
             self._event_history.append(event)
-            if len(self._event_history) > self.max_history:
-                self._event_history = self._event_history[-self.max_history:]
 
-            # Get handlers for this event type
-            handlers = self._subscribers.get(event.event_type, [])
+        # Get a copy of handlers to avoid holding lock during execution
+        with self._subscriber_lock:
+            handlers = list(self._subscribers.get(event.event_type, []))
 
         # Call handlers outside lock to avoid deadlock
         for handler in handlers:
             try:
-                # Check if handler is async
-                import inspect
                 if inspect.iscoroutinefunction(handler):
-                    # For async handlers, we'd need to run them in an event loop
-                    # For now, wrap in try-except
-                    logger.debug(f"Async handler called for {event.event_type.value}")
+                    # Run async handlers in thread pool with their own event loop
+                    self._async_executor.submit(self._run_async_handler, handler, event)
+                    logger.debug(f"Async handler submitted for {event.event_type.value}")
                 else:
                     handler(event)
             except Exception as exc:
@@ -148,30 +174,31 @@ class EventBus:
         limit: Optional[int] = None
     ) -> List[Event]:
         """Get event history with optional filtering.
-        
+
         Args:
             event_type: Filter by event type
             agent_id: Filter by agent ID
             task_id: Filter by task ID
             limit: Maximum number of events to return
-            
+
         Returns:
             List of matching events
         """
         with self._lock:
-            events = self._event_history
+            # Convert deque to list for filtering
+            events = list(self._event_history)
 
-            if event_type:
-                events = [e for e in events if e.event_type == event_type]
-            if agent_id:
-                events = [e for e in events if e.agent_id == agent_id]
-            if task_id:
-                events = [e for e in events if e.task_id == task_id]
+        if event_type:
+            events = [e for e in events if e.event_type == event_type]
+        if agent_id:
+            events = [e for e in events if e.agent_id == agent_id]
+        if task_id:
+            events = [e for e in events if e.task_id == task_id]
 
-            if limit:
-                events = events[-limit:]
+        if limit:
+            events = events[-limit:]
 
-            return events
+        return events
 
     def clear_history(self) -> None:
         """Clear event history."""
@@ -180,37 +207,60 @@ class EventBus:
 
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the event bus.
-        
+
         Returns:
             Dict with stats
         """
         with self._lock:
-            event_counts = {}
-            for event in self._event_history:
-                event_type = event.event_type.value
-                event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            events_snapshot = list(self._event_history)
 
-            return {
-                "total_events": len(self._event_history),
-                "event_counts": event_counts,
-                "subscribers": {
-                    et.value: len(handlers)
-                    for et, handlers in self._subscribers.items()
-                    if handlers
-                }
+        with self._subscriber_lock:
+            subscriber_counts = {
+                et.value: len(handlers)
+                for et, handlers in self._subscribers.items()
+                if handlers
             }
 
+        event_counts = {}
+        for event in events_snapshot:
+            event_type = event.event_type.value
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
 
-# Singleton instance
+        return {
+            "total_events": len(events_snapshot),
+            "event_counts": event_counts,
+            "subscribers": subscriber_counts
+        }
+
+    def shutdown(self) -> None:
+        """Shutdown the event bus and cleanup resources."""
+        self._async_executor.shutdown(wait=True)
+        logger.info("EventBus shutdown complete")
+
+
+# Singleton instance with thread-safe initialization
 _event_bus: Optional[EventBus] = None
+_event_bus_lock = threading.Lock()
 
 
 def get_event_bus() -> EventBus:
-    """Get the singleton event bus instance."""
+    """Get the singleton event bus instance (thread-safe double-checked locking)."""
     global _event_bus
     if _event_bus is None:
-        _event_bus = EventBus()
+        with _event_bus_lock:
+            # Double-check after acquiring lock
+            if _event_bus is None:
+                _event_bus = EventBus()
     return _event_bus
+
+
+def reset_event_bus() -> None:
+    """Reset the singleton event bus (useful for testing)."""
+    global _event_bus
+    with _event_bus_lock:
+        if _event_bus is not None:
+            _event_bus.shutdown()
+            _event_bus = None
 
 
 def publish_event(
