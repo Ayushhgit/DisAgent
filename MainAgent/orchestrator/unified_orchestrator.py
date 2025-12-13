@@ -4,9 +4,11 @@ This orchestrator integrates:
   - planning layer: ScopeAnalyzer → ChainOfThoughtProcessor → TaskPlanner → StateTracker
   - execution layer: dynamic agent spawning and file editing
   - memory system: unified context management
-  
+  - verification loop: closed-loop validation with test runner
+  - agent communication: point-to-point and channel-based messaging
+
 Architecture:
-  User Request → Scope Analysis → Task Planning → Agent Execution → Integration
+  User Request → Scope Analysis → Task Planning → Agent Execution → Verification → Integration
 """
 
 from __future__ import annotations
@@ -32,17 +34,56 @@ from core.runtime.llm import llm_call
 from core.runtime.agent import AgentResult, Agent
 from core.runtime.scheduler import TaskScheduler
 
+# New research-driven components
+from core.runtime.verification_loop import (
+    VerificationLoop,
+    VerificationConfig,
+    create_verification_loop
+)
+from core.runtime.agent_communication import (
+    get_communication_bus,
+    AgentCommunicator
+)
+from core.planning.semantic_scope_analyzer import (
+    HybridScopeAnalyzer,
+    SemanticScopeAnalyzer
+)
+
 logger = logging.getLogger(__name__)
 
 
-def analyze_scope(user_request: str) -> Dict:
+def analyze_scope(user_request: str, use_semantic: bool = True, project_path: Optional[str] = None) -> Dict:
     """Wrapper function to analyze scope from user request.
+
+    Args:
+        user_request: The user's request string
+        use_semantic: Whether to use LLM-powered semantic analysis
+        project_path: Optional path to project for file scanning
 
     Returns a validated scope dict with all required fields.
     Raises RuntimeError if scope analysis fails or returns invalid data.
     """
-    analyzer = ScopeAnalyzer()
-    scope = analyzer.analyze(user_request)
+    # Try semantic analyzer if enabled
+    if use_semantic:
+        try:
+            # Create LLM wrapper that matches expected signature
+            def llm_wrapper(prompt: str, max_tokens: Optional[int] = None) -> str:
+                return llm_call(prompt, max_tokens=max_tokens or 2000)
+
+            analyzer = HybridScopeAnalyzer(
+                llm_call=llm_wrapper,
+                project_path=project_path,
+                use_semantic=True
+            )
+            scope = analyzer.analyze(user_request, repo_path=project_path)
+            logger.info("Used semantic scope analysis")
+        except Exception as e:
+            logger.warning(f"Semantic analysis failed, falling back to keyword: {e}")
+            analyzer = ScopeAnalyzer()
+            scope = analyzer.analyze(user_request)
+    else:
+        analyzer = ScopeAnalyzer()
+        scope = analyzer.analyze(user_request)
 
     # Validate that we got a proper dict with required fields
     if not scope or not isinstance(scope, dict):
@@ -70,21 +111,55 @@ def analyze_scope(user_request: str) -> Dict:
 class UnifiedOrchestrator:
     """Orchestrates planning, execution, and integration in a unified workflow."""
 
-    def __init__(self, output_folder: str = "./generated_project"):
+    def __init__(
+        self,
+        output_folder: str = "./generated_project",
+        enable_verification: bool = True,
+        enable_semantic_analysis: bool = True,
+        run_tests: bool = True,
+        max_verification_retries: int = 3
+    ):
         """Initialize the orchestrator with file manager and state tracking.
-        
+
         Args:
             output_folder: Base output directory for generated files
+            enable_verification: Whether to run verification loop on edits
+            enable_semantic_analysis: Whether to use LLM-powered scope analysis
+            run_tests: Whether to run tests during verification
+            max_verification_retries: Max retries for verification failures
         """
         self.output_folder = output_folder
         self.file_manager = FileManager(output_folder)
         self.state_tracker = StateTracker(main_agent_id="main_orchestrator")
         self.task_planner = TaskPlanner(self.state_tracker, PlanValidator())
         self.cot_processor = ChainOfThoughtProcessor()
-        
+
         self.project_name = Path(output_folder).name
         self.context = create_context(self.project_name)
-        
+
+        # Configuration
+        self.enable_verification = enable_verification
+        self.enable_semantic_analysis = enable_semantic_analysis
+
+        # Initialize verification loop
+        if enable_verification:
+            verification_config = VerificationConfig(
+                max_retries=max_verification_retries,
+                run_tests=run_tests,
+                auto_correct=True,
+                rollback_on_failure=True
+            )
+            self.verification_loop = create_verification_loop(
+                output_folder,
+                config=verification_config,
+                llm_call=llm_call
+            )
+        else:
+            self.verification_loop = None
+
+        # Initialize agent communication bus
+        self.communication_bus = get_communication_bus()
+
         self.execution_stats: Dict[str, float] = {}
         self.overall_start_time = time.time()
 
@@ -111,14 +186,22 @@ class UnifiedOrchestrator:
             print("[STAGE 1: SCOPE ANALYSIS]")
             print("─" * 80)
             scope_start = time.time()
-            
-            scope_info = analyze_scope(user_request)
+
+            scope_info = analyze_scope(
+                user_request,
+                use_semantic=self.enable_semantic_analysis,
+                project_path=self.output_folder
+            )
             self.execution_stats["scope_analysis"] = round(time.time() - scope_start, 2)
             self.context.set_scope(scope_info)
-            
+
+            analysis_mode = "semantic" if self.enable_semantic_analysis else "keyword"
+            print(f"Analysis Mode: {analysis_mode}")
             print(f"Scope Level: {scope_info.get('scope_level', 'unknown')}")
             print(f"Complexity: {scope_info.get('complexity', 'unknown')}")
             print(f"Domains: {', '.join(scope_info.get('domains', []))}")
+            if scope_info.get('risk_level'):
+                print(f"Risk Level: {scope_info.get('risk_level')}")
             print(f"Time: {self.execution_stats['scope_analysis']}s\n")
 
             # ===== STAGE 2: CHAIN OF THOUGHT REASONING =====
@@ -173,10 +256,12 @@ class UnifiedOrchestrator:
             print("[STAGE 4: TASK REGISTRATION & AGENT SETUP]")
             print("─" * 80)
             
-            # Register all agents in StateTracker
+            # Register all agents in StateTracker and Communication Bus
             for agent_name in agent_names:
                 self.state_tracker.register_agent(agent_name)
                 self.context.register_agent(agent_name)
+                # Register agent in communication bus
+                self.communication_bus.register_agent(agent_name)
                 print(f"[OK] Registered agent: {agent_name}")
 
             # Create tasks using TaskPlanner (preserves dependencies, sets assigned_agent=None)
@@ -340,6 +425,25 @@ Keep it under 1000 words."""
             print(f"   - Vector store entries: {vs_count}")
             print(f"   - Tasks tracked: {len(self.state_tracker.tasks)}")
 
+        # Verification statistics
+        if self.verification_loop:
+            print("\n[VERIFICATION] Verification Statistics:")
+            v_stats = self.verification_loop.get_stats()
+            print(f"   - Total verifications: {v_stats.get('total_verifications', 0)}")
+            print(f"   - Successful: {v_stats.get('successful', 0)}")
+            print(f"   - Failed: {v_stats.get('failed', 0)}")
+            print(f"   - Retries: {v_stats.get('retries', 0)}")
+            print(f"   - Rollbacks: {v_stats.get('rollbacks', 0)}")
+
+        # Communication statistics
+        print("\n[COMMUNICATION] Agent Communication Statistics:")
+        comm_stats = self.communication_bus.get_stats()
+        print(f"   - Registered agents: {comm_stats.get('registered_agents', 0)}")
+        print(f"   - Active channels: {comm_stats.get('channels', 0)}")
+        print(f"   - Total deliveries: {comm_stats.get('total_deliveries', 0)}")
+        print(f"   - Successful: {comm_stats.get('successful_deliveries', 0)}")
+        print(f"   - Failed: {comm_stats.get('failed_deliveries', 0)}")
+
         print("\n[STATE] System State:")
         print(self.state_tracker.get_system_summary())
 
@@ -357,12 +461,26 @@ Keep it under 1000 words."""
 
 
 # Convenient entry point
-def orchestrator(user_request: str, output_folder: str = "./generated_project") -> None:
+def orchestrator(
+    user_request: str,
+    output_folder: str = "./generated_project",
+    enable_verification: bool = True,
+    enable_semantic_analysis: bool = True,
+    run_tests: bool = True
+) -> None:
     """Run the unified orchestrator with planning + execution.
-    
+
     Args:
         user_request: High-level user request
         output_folder: Output directory for generated files
+        enable_verification: Whether to run verification loop on edits
+        enable_semantic_analysis: Whether to use LLM-powered scope analysis
+        run_tests: Whether to run tests during verification
     """
-    unified_orchestrator = UnifiedOrchestrator(output_folder)
+    unified_orchestrator = UnifiedOrchestrator(
+        output_folder,
+        enable_verification=enable_verification,
+        enable_semantic_analysis=enable_semantic_analysis,
+        run_tests=run_tests
+    )
     unified_orchestrator.run(user_request)
