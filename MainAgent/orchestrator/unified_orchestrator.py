@@ -84,36 +84,61 @@ def detect_intent(user_request: str, project_path: Optional[str] = None) -> tupl
     """
     request_lower = user_request.lower().strip()
 
+    # Generation/action patterns - these OVERRIDE question detection
+    # If user wants to build/create something, it's generation even with "?"
+    generation_patterns = [
+        "build ", "create ", "make ", "implement ", "develop ", "write ",
+        "add a ", "add the ", "generate ", "setup ", "set up ",
+        "install ", "configure ", "deploy ", "fix ", "update ", "modify ",
+        "refactor ", "optimize ", "improve ", "enhance ", "extend ",
+    ]
+
+    # Check if this is clearly a generation/action request
+    is_generation_request = any(request_lower.startswith(p) or f" {p}" in request_lower
+                                 for p in generation_patterns)
+
     # Question patterns - these should NOT trigger code regeneration
+    # Only match if NOT a generation request
     question_patterns = [
         "how do i run", "how to run", "how can i run", "how do you run",
         "how to start", "how do i start", "how to execute", "how to use",
-        "how does", "what is", "what are", "what does", "where is", "where are",
-        "can you explain", "explain how", "tell me about", "describe",
-        "show me how", "help me understand", "what's the", "whats the",
-        "is there", "are there", "does this", "do i need",
-        "why is", "why does", "why are", "when should",
-        "which file", "which folder", "which command",
-        "instructions for", "guide for", "documentation",
-        "?",  # Any question mark indicates a question
+        "how does it work", "how does this work", "how does the",
+        "what is the", "what are the", "what does the", "what does it",
+        "where is the", "where are the", "where can i find",
+        "can you explain", "explain how", "explain the", "tell me about",
+        "describe the", "describe how",
+        "show me how to run", "help me understand",
+        "what's the command", "whats the command",
+        "is there a way to run", "are there any instructions",
+        "does this have", "do i need to",
+        "why is the", "why does the", "why are the",
+        "when should i", "which file contains", "which folder has",
+        "which command", "instructions for running", "guide for running",
     ]
 
-    # Help patterns
+    # Help patterns - more specific to avoid matching "help me build"
     help_patterns = [
-        "help", "readme", "documentation", "docs", "manual",
-        "getting started", "quickstart", "setup guide"
+        "show me the readme", "read the readme", "documentation for",
+        "getting started guide", "quickstart guide", "setup guide",
+        "how to run this", "how do i run this", "how to start this",
+        "run instructions", "running instructions", "execution instructions",
     ]
 
-    # Check for question patterns
-    is_question = any(pattern in request_lower for pattern in question_patterns)
-    is_help = any(pattern in request_lower for pattern in help_patterns)
+    # Check for question patterns (but not if it's clearly a generation request)
+    is_question = False
+    is_help = False
+
+    if not is_generation_request:
+        is_question = any(pattern in request_lower for pattern in question_patterns)
+        is_help = any(pattern in request_lower for pattern in help_patterns)
 
     # Check if referring to existing project/app
     existing_project_patterns = [
-        "this app", "this project", "the app", "the project",
+        "this app", "this project", "the app i", "the project i",
         "you made", "you created", "you built", "you generated",
-        "we made", "we created", "existing", "current",
-        "my app", "my project", "our app", "our project"
+        "we made", "we created", "the existing", "the current",
+        "my app", "my project", "our app", "our project",
+        "app you made", "project you made", "app you created",
     ]
     is_about_existing = any(pattern in request_lower for pattern in existing_project_patterns)
 
@@ -130,11 +155,22 @@ def detect_intent(user_request: str, project_path: Optional[str] = None) -> tupl
         except Exception:
             pass
 
-    # Determine intent
-    if is_help:
-        return UserIntent.HELP, is_about_existing or has_existing_files
-    elif is_question:
-        return UserIntent.QUESTION, is_about_existing or has_existing_files
+    # Determine intent with priority:
+    # 1. Explicit generation patterns always win
+    # 2. Help/question only if about existing project AND has question patterns
+    # 3. Modification if about existing project but no question patterns
+    # 4. Generation as default
+
+    if is_generation_request:
+        # User explicitly wants to build/create something
+        if is_about_existing or has_existing_files:
+            return UserIntent.MODIFICATION, True
+        return UserIntent.GENERATION, False
+
+    if is_help and (is_about_existing or has_existing_files):
+        return UserIntent.HELP, True
+    elif is_question and (is_about_existing or has_existing_files):
+        return UserIntent.QUESTION, True
     elif is_about_existing or has_existing_files:
         return UserIntent.MODIFICATION, True
     else:
