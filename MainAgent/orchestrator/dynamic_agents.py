@@ -4,13 +4,63 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from .context import AgentContext
 from .extractors import extract_and_apply_edits, extract_and_write_files
 from .file_manager import FileManager
 from core.runtime.llm import llm_call
 from core.memory.memory_types import MemoryPriority
+
+# Global statistics tracking (shared across agent executions)
+_execution_stats: Dict[str, Any] = {
+    "total_agent_calls": 0,
+    "successful_calls": 0,
+    "failed_calls": 0,
+    "files_created": 0,
+    "files_edited": 0,
+    "edits_failed": 0,
+    "total_tokens_estimated": 0,
+    "agent_durations": {}
+}
+
+def get_execution_stats() -> Dict[str, Any]:
+    """Get current execution statistics."""
+    return dict(_execution_stats)
+
+def reset_execution_stats() -> None:
+    """Reset execution statistics."""
+    global _execution_stats
+    _execution_stats = {
+        "total_agent_calls": 0,
+        "successful_calls": 0,
+        "failed_calls": 0,
+        "files_created": 0,
+        "files_edited": 0,
+        "edits_failed": 0,
+        "total_tokens_estimated": 0,
+        "agent_durations": {}
+    }
+
+def _update_stats(
+    agent_name: str,
+    success: bool,
+    files_created: int = 0,
+    files_edited: int = 0,
+    edits_failed: int = 0,
+    duration: float = 0.0
+) -> None:
+    """Update execution statistics."""
+    global _execution_stats
+    _execution_stats["total_agent_calls"] += 1
+    if success:
+        _execution_stats["successful_calls"] += 1
+    else:
+        _execution_stats["failed_calls"] += 1
+    _execution_stats["files_created"] += files_created
+    _execution_stats["files_edited"] += files_edited
+    _execution_stats["edits_failed"] += edits_failed
+    _execution_stats["agent_durations"][agent_name] = duration
 
 
 def create_dynamic_agent(
@@ -20,6 +70,8 @@ def create_dynamic_agent(
     context: AgentContext,
     file_manager: FileManager,
     allowed_files: Optional[List[str]] = None,
+    critic_agent=None,  # Optional CriticAgent for output review
+    verification_loop=None,  # Optional VerificationLoop for validation
 ) -> str:
     """Execute a dynamic agent prompt and materialize produced files.
 
@@ -27,9 +79,13 @@ def create_dynamic_agent(
     1. Reads from shared memory to get relevant context
     2. Builds a comprehensive prompt with project context
     3. Executes the agent via LLM
-    4. Writes outputs back to shared memory
-    5. Applies file changes (creates/edits)
+    4. Optionally reviews output with critic agent
+    5. Writes outputs back to shared memory
+    6. Applies file changes (creates/edits)
+    7. Tracks execution statistics
     """
+    import time
+    start_time = time.time()
 
     # STEP 1: Read from shared memory to get relevant context
     memory_context = ""
@@ -246,8 +302,13 @@ FILE ACCESS:
                 context="File processing failed"
             )
 
+    files_created_count = 0
+    files_edited_count = 0
+    edits_failed_count = 0
+
     if files_written:
-        print(f"\n   [OK] Created {len(files_written)} new file(s)")
+        files_created_count = len(files_written)
+        print(f"\n   [OK] Created {files_created_count} new file(s)")
         # Record files created to memory
         for filename in files_written.keys():
             if context.unified_memory:
@@ -262,6 +323,8 @@ FILE ACCESS:
     if edits_applied:
         successful = sum(1 for value in edits_applied.values() if value)
         failed = len(edits_applied) - successful
+        files_edited_count = successful
+        edits_failed_count = failed
         print(f"   [OK] Applied {successful} edit(s) to existing files")
         if failed > 0:
             print(f"   [WARN] {failed} edit(s) failed to apply")
@@ -277,6 +340,36 @@ FILE ACCESS:
 
     if not files_written and not edits_applied:
         print(f"\n   [WARN] WARNING: No file changes made by {agent_name}")
+
+    # Track execution statistics
+    duration = time.time() - start_time
+    success = bool(output and (files_written or edits_applied))
+    _update_stats(
+        agent_name=agent_name,
+        success=success,
+        files_created=files_created_count,
+        files_edited=files_edited_count,
+        edits_failed=edits_failed_count,
+        duration=duration
+    )
+
+    # Optional: Run critic review if provided
+    if critic_agent and output:
+        try:
+            from core.runtime.critic import ApprovalStatus
+            print(f"\n   [CRITIC] Reviewing {agent_name} output...")
+            critique_result = critic_agent.critique(
+                agent_output=output,
+                task_description=user_request,
+                context={"agent": agent_name}
+            )
+            print(f"   [CRITIC] Status: {critique_result.status.value}, Score: {critique_result.score:.2f}")
+            if critique_result.issues:
+                print(f"   [CRITIC] Issues found: {len(critique_result.issues)}")
+        except Exception as e:
+            print(f"   [CRITIC] Review failed: {e}")
+
+    print(f"\n   [STATS] Agent {agent_name}: {duration:.2f}s, Files: +{files_created_count}, Edits: {files_edited_count}")
 
     return output
 

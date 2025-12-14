@@ -11,9 +11,10 @@ This orchestrator integrates:
   - conflict resolver: concurrent edit merging
   - experience learner: incremental learning from history
   - execution tracer: structured observability
+  - intent detection: distinguish questions from code generation
 
 Architecture:
-  User Request → Scope Analysis → Task Planning → Agent Execution → Critic Review → Verification → Integration
+  User Request → Intent Detection → Scope Analysis → Task Planning → Agent Execution → Critic Review → Verification → Integration
 """
 
 from __future__ import annotations
@@ -60,6 +61,143 @@ from core.planning.semantic_scope_analyzer import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ===== INTENT DETECTION =====
+class UserIntent:
+    """Represents the detected intent of a user request."""
+    QUESTION = "question"  # User asking about existing code/how to run
+    GENERATION = "generation"  # User wants new code generated
+    MODIFICATION = "modification"  # User wants existing code modified
+    HELP = "help"  # User asking for help/documentation
+
+
+def detect_intent(user_request: str, project_path: Optional[str] = None) -> tuple:
+    """Detect whether the user is asking a question or requesting code generation.
+
+    Args:
+        user_request: The user's request string
+        project_path: Optional path to check for existing project
+
+    Returns:
+        Tuple of (intent_type, is_about_existing_project)
+    """
+    request_lower = user_request.lower().strip()
+
+    # Question patterns - these should NOT trigger code regeneration
+    question_patterns = [
+        "how do i run", "how to run", "how can i run", "how do you run",
+        "how to start", "how do i start", "how to execute", "how to use",
+        "how does", "what is", "what are", "what does", "where is", "where are",
+        "can you explain", "explain how", "tell me about", "describe",
+        "show me how", "help me understand", "what's the", "whats the",
+        "is there", "are there", "does this", "do i need",
+        "why is", "why does", "why are", "when should",
+        "which file", "which folder", "which command",
+        "instructions for", "guide for", "documentation",
+        "?",  # Any question mark indicates a question
+    ]
+
+    # Help patterns
+    help_patterns = [
+        "help", "readme", "documentation", "docs", "manual",
+        "getting started", "quickstart", "setup guide"
+    ]
+
+    # Check for question patterns
+    is_question = any(pattern in request_lower for pattern in question_patterns)
+    is_help = any(pattern in request_lower for pattern in help_patterns)
+
+    # Check if referring to existing project/app
+    existing_project_patterns = [
+        "this app", "this project", "the app", "the project",
+        "you made", "you created", "you built", "you generated",
+        "we made", "we created", "existing", "current",
+        "my app", "my project", "our app", "our project"
+    ]
+    is_about_existing = any(pattern in request_lower for pattern in existing_project_patterns)
+
+    # Also check if project directory has existing files
+    has_existing_files = False
+    if project_path:
+        try:
+            project_dir = Path(project_path)
+            if project_dir.exists():
+                # Count actual code files (not just any files)
+                code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.json', '.yaml', '.yml'}
+                code_files = [f for f in project_dir.rglob('*') if f.is_file() and f.suffix in code_extensions]
+                has_existing_files = len(code_files) > 0
+        except Exception:
+            pass
+
+    # Determine intent
+    if is_help:
+        return UserIntent.HELP, is_about_existing or has_existing_files
+    elif is_question:
+        return UserIntent.QUESTION, is_about_existing or has_existing_files
+    elif is_about_existing or has_existing_files:
+        return UserIntent.MODIFICATION, True
+    else:
+        return UserIntent.GENERATION, False
+
+
+def handle_question_intent(
+    user_request: str,
+    project_path: str,
+    llm_call_func
+) -> str:
+    """Handle question/help intent by providing information instead of generating code.
+
+    Args:
+        user_request: The user's question
+        project_path: Path to the project
+        llm_call_func: LLM function to call
+
+    Returns:
+        Answer to the user's question
+    """
+    from .file_manager import FileManager
+
+    file_manager = FileManager(project_path)
+    project_structure = file_manager.get_project_structure_tree()
+    available_files = file_manager.list_files("*")
+
+    # Build context about the project
+    files_context = "PROJECT STRUCTURE:\n" + project_structure + "\n\n"
+
+    # Read key files for context (README, main files, package files)
+    key_files = []
+    for pattern in ['README*', 'readme*', 'package.json', 'requirements.txt', 'main.py', 'app.py', 'index.*']:
+        matches = [f for f in available_files if Path(f).match(pattern)]
+        key_files.extend(matches[:2])  # Limit per pattern
+
+    if key_files:
+        files_context += "KEY FILES CONTENT:\n"
+        for key_file in key_files[:5]:  # Limit total
+            content = file_manager.read_file(key_file)
+            if content:
+                files_context += f"\n--- {key_file} ---\n{content[:1500]}\n"
+
+    prompt = f"""You are a helpful assistant answering questions about an existing project.
+
+USER QUESTION: {user_request}
+
+{files_context}
+
+INSTRUCTIONS:
+1. Answer the user's question based on the project structure and files shown above
+2. If asking "how to run", look for:
+   - README files for instructions
+   - package.json for npm scripts
+   - requirements.txt for Python dependencies
+   - Main entry points (main.py, app.py, index.js, etc.)
+3. Provide clear, step-by-step instructions when applicable
+4. Do NOT generate new code - just answer the question
+5. If the information isn't available, say so and suggest what they might need
+
+Provide a helpful, concise answer:"""
+
+    return llm_call_func(prompt, max_tokens=1500, temperature=0.3)
 
 
 def analyze_scope(user_request: str, use_semantic: bool = True, project_path: Optional[str] = None) -> Dict:
@@ -219,7 +357,7 @@ class UnifiedOrchestrator:
 
     def run(self, user_request: str) -> None:
         """Execute the complete orchestration workflow.
-        
+
         Args:
             user_request: The user's high-level request
         """
@@ -228,6 +366,26 @@ class UnifiedOrchestrator:
             print("UNIFIED ORCHESTRATOR - Planning + Execution")
             print("=" * 80)
             print(f"\n[REQUEST] {user_request}\n")
+
+            # ===== STAGE 0: INTENT DETECTION =====
+            print("\n" + "─" * 80)
+            print("[STAGE 0: INTENT DETECTION]")
+            print("─" * 80)
+
+            intent_type, is_about_existing = detect_intent(user_request, self.output_folder)
+            print(f"Detected Intent: {intent_type}")
+            print(f"About Existing Project: {is_about_existing}")
+
+            # Handle question/help intents without code generation
+            if intent_type in (UserIntent.QUESTION, UserIntent.HELP) and is_about_existing:
+                print("\n[INFO] Detected question about existing project - providing answer without code generation\n")
+                answer = handle_question_intent(user_request, self.output_folder, llm_call)
+                print("\n" + "=" * 80)
+                print("ANSWER")
+                print("=" * 80)
+                print(f"\n{answer}\n")
+                print("=" * 80)
+                return  # Exit early - no code generation needed
 
             # Load existing memory if available
             if self.context.load_memory():
@@ -334,9 +492,17 @@ class UnifiedOrchestrator:
             # Create Agent wrappers and run them via TaskScheduler so execution is concurrent
             print("\n[STAGE 5: AGENT EXECUTION (SCHEDULED)]")
 
+            # Reset execution stats for this run
+            from .dynamic_agents import get_execution_stats, reset_execution_stats
+            reset_execution_stats()
+
             # Thin Agent wrapper around the existing create_dynamic_agent function
             # DynamicAgent now uses relevance selector to choose files
             from core.runtime.relevance import select_relevant_files
+
+            # Capture critic reference for closure
+            critic_ref = self.critic
+            verification_ref = self.verification_loop
 
             class DynamicAgent(Agent):
                 def __init__(self, name: str):
@@ -349,7 +515,12 @@ class UnifiedOrchestrator:
                     domains = scope_info.get("domains", []) if scope_info else []
                     # compute relevant files using heuristics
                     relevant = select_relevant_files(all_files, prompt, domains, max_files=12)
-                    output = create_dynamic_agent(self.name, prompt, user_request, context, file_manager, allowed_files=relevant)
+                    output = create_dynamic_agent(
+                        self.name, prompt, user_request, context, file_manager,
+                        allowed_files=relevant,
+                        critic_agent=critic_ref,
+                        verification_loop=verification_ref
+                    )
                     success = bool(output and len(output) > 20)
                     return AgentResult(success=success, output=output or "", metadata={"files": relevant})
 
@@ -458,6 +629,22 @@ Keep it under 1000 words."""
         print(f"   - Prompt Engineering: {self.execution_stats.get('prompt_engineering', 0)}s")
         print(f"   - Integration: {self.execution_stats.get('integration', 0)}s")
         print(f"   - Total: {total_time}s")
+
+        # Agent execution statistics
+        from .dynamic_agents import get_execution_stats
+        agent_stats = get_execution_stats()
+        print(f"\n[EXECUTION] Agent Execution Statistics:")
+        print(f"   - Total Agent Calls: {agent_stats.get('total_agent_calls', 0)}")
+        print(f"   - Successful Calls: {agent_stats.get('successful_calls', 0)}")
+        print(f"   - Failed Calls: {agent_stats.get('failed_calls', 0)}")
+        print(f"   - Files Created: {agent_stats.get('files_created', 0)}")
+        print(f"   - Files Edited: {agent_stats.get('files_edited', 0)}")
+        print(f"   - Edits Failed: {agent_stats.get('edits_failed', 0)}")
+
+        if agent_stats.get('agent_durations'):
+            print(f"   - Agent Durations:")
+            for agent, duration in agent_stats['agent_durations'].items():
+                print(f"      - {agent}: {duration:.2f}s")
 
         print(f"\n[FILES] Project Files:")
         print(f"   - Total Files: {len(self.file_manager.created_files)}")
