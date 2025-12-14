@@ -582,29 +582,32 @@ class PatchApplicationError(Exception):
 
 def create_verification_loop(
     project_path: str,
+    config: Optional[VerificationConfig] = None,
+    llm_call: Optional[Callable[[str], str]] = None,
     max_retries: int = 3,
     run_tests: bool = True,
     auto_correct: bool = True,
-    llm_call: Optional[Callable[[str], str]] = None,
     **kwargs
 ) -> VerificationLoop:
     """Factory function to create a verification loop.
 
     Args:
         project_path: Root directory of the project
-        max_retries: Maximum retry attempts
-        run_tests: Whether to run tests after edits
-        auto_correct: Whether to use LLM for error correction
+        config: Optional pre-built VerificationConfig
         llm_call: LLM function for corrections
-        **kwargs: Additional config options
+        max_retries: Maximum retry attempts (if config not provided)
+        run_tests: Whether to run tests after edits (if config not provided)
+        auto_correct: Whether to use LLM for error correction (if config not provided)
+        **kwargs: Additional config options (if config not provided)
 
     Returns:
         Configured VerificationLoop instance
     """
-    config = VerificationConfig(
-        max_retries=max_retries,
-        run_tests=run_tests,
-        auto_correct=auto_correct,
-        **kwargs
-    )
+    if config is None:
+        config = VerificationConfig(
+            max_retries=max_retries,
+            run_tests=run_tests,
+            auto_correct=auto_correct,
+            **kwargs
+        )
     return VerificationLoop(project_path, config, llm_call)
