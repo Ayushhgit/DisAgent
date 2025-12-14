@@ -507,6 +507,7 @@ class BatchVerificationLoop:
 
         results = []
         transaction_id = f"batch_{int(time.time() * 1000)}"
+        test_result = None  # Initialize to avoid undefined variable
 
         try:
             with file_manager.transaction(transaction_id):
@@ -543,7 +544,7 @@ class BatchVerificationLoop:
                     results.append(VerificationResult(
                         status=VerificationStatus.SUCCESS,
                         edit=edit,
-                        test_result=test_result if self.config.run_tests else None,
+                        test_result=test_result,  # Will be None if run_tests=False
                         final_content=final_content
                     ))
 

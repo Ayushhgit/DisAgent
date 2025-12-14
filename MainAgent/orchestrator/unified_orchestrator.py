@@ -19,6 +19,7 @@ Architecture:
 
 from __future__ import annotations
 
+import os
 import time
 import logging
 from typing import Dict, List, Optional
@@ -490,9 +491,16 @@ class UnifiedOrchestrator:
             print("[STAGE 3: PROMPT ENGINEERING]")
             print("─" * 80)
             prompt_start = time.time()
-            
+
             # Use new scope analyzer output for agent selection
             agent_names = scope_info.get("agents_needed", [])
+
+            # Validate agent_names - must have at least one agent
+            if not agent_names:
+                logger.warning("No agents specified by scope analyzer, using default 'generalist'")
+                agent_names = ["generalist"]
+                scope_info["agents_needed"] = agent_names
+
             custom_prompts = prompt_engineer_agent(user_request, agent_names, self.context)
             self.execution_stats["prompt_engineering"] = round(time.time() - prompt_start, 2)
             
@@ -689,7 +697,9 @@ Keep it under 1000 words."""
         if self.file_manager.created_files:
             print("\n   File List:")
             for file_path in sorted(self.file_manager.created_files):
-                rel_path = file_path.replace(str(self.file_manager.base_path) + "\\", "")
+                # Handle both Windows and Unix path separators
+                base_str = str(self.file_manager.base_path)
+                rel_path = file_path.replace(base_str + os.sep, "").replace(base_str + "/", "").replace(base_str + "\\", "")
                 print(f"      - {rel_path}")
 
         print("\n[MEMORY] Memory Statistics:")
