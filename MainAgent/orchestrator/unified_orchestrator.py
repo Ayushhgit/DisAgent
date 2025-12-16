@@ -61,6 +61,21 @@ from core.planning.semantic_scope_analyzer import (
     SemanticScopeAnalyzer
 )
 
+# Security module
+from core.security import (
+    validate_user_prompt,
+    detect_prompt_injection,
+    sanitize_llm_output_for_file,
+    is_safe_to_write,
+    SecurityCheckResult
+)
+from core.exceptions import (
+    PromptInjectionError,
+    InvalidInputError,
+    EmptyInputError,
+    DisAgentError
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -402,6 +417,35 @@ class UnifiedOrchestrator:
             print("\n" + "=" * 80)
             print("UNIFIED ORCHESTRATOR - Planning + Execution")
             print("=" * 80)
+
+            # ===== SECURITY VALIDATION =====
+            print("\n[SECURITY] Validating input...")
+            try:
+                # Validate and sanitize user prompt
+                sanitized_request, security_result = validate_user_prompt(
+                    user_request,
+                    min_length=3,
+                    max_length=50000,
+                    check_injection=True
+                )
+
+                if not security_result.is_safe:
+                    if security_result.risk_level in ("high", "critical"):
+                        print(f"[WARN] Security concerns detected: {security_result.issues}")
+                        print("[WARN] Using sanitized input")
+                        user_request = sanitized_request
+                    else:
+                        print(f"[INFO] Minor security notes: {security_result.issues}")
+                else:
+                    print("[OK] Input validation passed")
+
+            except EmptyInputError:
+                print("[ERROR] Empty request provided")
+                return
+            except InvalidInputError as e:
+                print(f"[ERROR] Invalid input: {e}")
+                return
+
             print(f"\n[REQUEST] {user_request}\n")
 
             # ===== STAGE 0: INTENT DETECTION =====

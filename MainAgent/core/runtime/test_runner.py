@@ -620,3 +620,238 @@ def run_tests(
         test_pattern=test_pattern,
         verbose=verbose
     )
+
+
+# === Test Discovery ===
+
+@dataclass
+class DiscoveredTest:
+    """Represents a discovered test."""
+    file_path: str
+    test_name: str
+    test_type: str  # "function", "class", "method"
+    line_number: int = 0
+    docstring: str = ""
+
+
+def discover_tests(
+    project_path: str,
+    include_patterns: Optional[List[str]] = None,
+    exclude_patterns: Optional[List[str]] = None
+) -> List[DiscoveredTest]:
+    """Discover all tests in a project.
+
+    Args:
+        project_path: Root directory of the project
+        include_patterns: Glob patterns for test files to include
+        exclude_patterns: Glob patterns for files to exclude
+
+    Returns:
+        List of discovered tests
+    """
+    project = Path(project_path).resolve()
+    discovered = []
+
+    # Default patterns
+    if include_patterns is None:
+        include_patterns = [
+            "**/test_*.py",
+            "**/*_test.py",
+            "**/tests/*.py",
+            "**/test/*.py",
+            "**/*.test.js",
+            "**/*.spec.js",
+            "**/*.test.ts",
+            "**/*.spec.ts",
+        ]
+
+    if exclude_patterns is None:
+        exclude_patterns = [
+            "**/node_modules/**",
+            "**/__pycache__/**",
+            "**/venv/**",
+            "**/.git/**",
+            "**/dist/**",
+            "**/build/**",
+        ]
+
+    # Find all test files
+    test_files = set()
+    for pattern in include_patterns:
+        for file_path in project.glob(pattern):
+            # Check against exclude patterns
+            rel_path = str(file_path.relative_to(project))
+            excluded = False
+            for excl in exclude_patterns:
+                if file_path.match(excl):
+                    excluded = True
+                    break
+            if not excluded and file_path.is_file():
+                test_files.add(file_path)
+
+    # Parse test files
+    for test_file in test_files:
+        try:
+            discovered.extend(_discover_tests_in_file(test_file, project))
+        except Exception as e:
+            logger.warning(f"Error parsing {test_file}: {e}")
+
+    return discovered
+
+
+def _discover_tests_in_file(file_path: Path, project_root: Path) -> List[DiscoveredTest]:
+    """Discover tests in a single file."""
+    tests = []
+    rel_path = str(file_path.relative_to(project_root))
+
+    try:
+        content = file_path.read_text(encoding='utf-8')
+    except Exception:
+        return tests
+
+    suffix = file_path.suffix.lower()
+
+    if suffix == '.py':
+        tests.extend(_discover_python_tests(content, rel_path))
+    elif suffix in ('.js', '.ts', '.jsx', '.tsx'):
+        tests.extend(_discover_js_tests(content, rel_path))
+
+    return tests
+
+
+def _discover_python_tests(content: str, file_path: str) -> List[DiscoveredTest]:
+    """Discover tests in Python file."""
+    tests = []
+    lines = content.split('\n')
+
+    # Pattern for test functions and methods
+    func_pattern = re.compile(r'^(\s*)def\s+(test_\w+)\s*\(', re.MULTILINE)
+    class_pattern = re.compile(r'^class\s+(Test\w+)\s*[\(:]', re.MULTILINE)
+
+    current_class = None
+
+    for i, line in enumerate(lines, 1):
+        # Check for test class
+        class_match = re.match(r'^class\s+(Test\w+)', line)
+        if class_match:
+            current_class = class_match.group(1)
+            tests.append(DiscoveredTest(
+                file_path=file_path,
+                test_name=current_class,
+                test_type="class",
+                line_number=i
+            ))
+
+        # Check for test function/method
+        func_match = re.match(r'^(\s*)def\s+(test_\w+)\s*\(', line)
+        if func_match:
+            indent, name = func_match.groups()
+            is_method = len(indent) > 0 and current_class is not None
+
+            full_name = f"{current_class}.{name}" if is_method else name
+            tests.append(DiscoveredTest(
+                file_path=file_path,
+                test_name=full_name,
+                test_type="method" if is_method else "function",
+                line_number=i
+            ))
+
+    return tests
+
+
+def _discover_js_tests(content: str, file_path: str) -> List[DiscoveredTest]:
+    """Discover tests in JavaScript/TypeScript file."""
+    tests = []
+
+    # Patterns for common JS test frameworks
+    patterns = [
+        # Jest/Mocha: describe(), it(), test()
+        (r'(?:describe|context)\s*\(\s*[\'"](.+?)[\'"]', 'describe'),
+        (r'(?:it|test)\s*\(\s*[\'"](.+?)[\'"]', 'test'),
+        (r'(?:it|test)\.(?:only|skip)\s*\(\s*[\'"](.+?)[\'"]', 'test'),
+    ]
+
+    lines = content.split('\n')
+    current_describe = None
+
+    for i, line in enumerate(lines, 1):
+        for pattern, test_type in patterns:
+            match = re.search(pattern, line)
+            if match:
+                name = match.group(1)
+                if test_type == 'describe':
+                    current_describe = name
+                    tests.append(DiscoveredTest(
+                        file_path=file_path,
+                        test_name=name,
+                        test_type="describe",
+                        line_number=i
+                    ))
+                else:
+                    full_name = f"{current_describe} > {name}" if current_describe else name
+                    tests.append(DiscoveredTest(
+                        file_path=file_path,
+                        test_name=full_name,
+                        test_type="test",
+                        line_number=i
+                    ))
+
+    return tests
+
+
+def get_tests_for_file(project_path: str, target_file: str) -> List[DiscoveredTest]:
+    """Get tests that might be related to a specific source file.
+
+    Args:
+        project_path: Root directory of the project
+        target_file: Source file to find tests for
+
+    Returns:
+        List of potentially related tests
+    """
+    all_tests = discover_tests(project_path)
+
+    # Get base name without extension
+    target_path = Path(target_file)
+    target_name = target_path.stem.replace('_', '').replace('-', '').lower()
+
+    related = []
+    for test in all_tests:
+        test_path = Path(test.file_path)
+        test_name = test_path.stem.replace('test_', '').replace('_test', '').lower()
+
+        # Check if test name matches target file
+        if target_name in test_name or test_name in target_name:
+            related.append(test)
+
+    return related
+
+
+def count_tests(project_path: str) -> Dict[str, int]:
+    """Count tests in a project by type.
+
+    Returns:
+        Dict with counts by test type
+    """
+    tests = discover_tests(project_path)
+
+    counts = {
+        "total": len(tests),
+        "functions": 0,
+        "methods": 0,
+        "classes": 0,
+        "describes": 0,
+        "test_files": len(set(t.file_path for t in tests))
+    }
+
+    for test in tests:
+        if test.test_type == "function":
+            counts["functions"] += 1
+        elif test.test_type == "method":
+            counts["methods"] += 1
+        elif test.test_type == "class":
+            counts["classes"] += 1
+        elif test.test_type == "describe":
+            counts["describes"] += 1
+
+    return counts

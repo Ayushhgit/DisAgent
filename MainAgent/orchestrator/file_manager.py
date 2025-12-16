@@ -5,6 +5,8 @@ Features:
 - Transaction support with rollback capability
 - Edit history tracking
 - Automatic backup before modifications
+- File locking for multi-process safety
+- Automatic cleanup of old backups and proposed changes
 """
 
 from __future__ import annotations
@@ -15,14 +17,23 @@ import time
 import shutil
 import threading
 import tempfile
+import fcntl
+import hashlib
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 import logging
+import atexit
 
 logger = logging.getLogger(__name__)
+
+# File lock timeout in seconds
+FILE_LOCK_TIMEOUT = 10.0
+
+# Default max total backup size in bytes (100 MB)
+DEFAULT_MAX_BACKUP_SIZE = 100 * 1024 * 1024
 
 
 def _safe_print(text: str) -> None:
@@ -62,7 +73,14 @@ class FileManager:
     Supports transactions with rollback capability.
     """
 
-    def __init__(self, base_path: str, enable_backups: bool = True, max_backups: int = 10):
+    def __init__(
+        self,
+        base_path: str,
+        enable_backups: bool = True,
+        max_backups: int = 10,
+        max_backup_size: int = DEFAULT_MAX_BACKUP_SIZE,
+        auto_cleanup: bool = True
+    ):
         self.base_path = Path(base_path)
         self.created_files: List[str] = []
         self.created_dirs: List[str] = []
@@ -76,7 +94,19 @@ class FileManager:
         # Backup configuration
         self.enable_backups = enable_backups
         self.max_backups = max_backups
+        self.max_backup_size = max_backup_size
         self._backup_dir = self.base_path / ".backups"
+
+        # File locking for multi-process safety
+        self._file_locks: Dict[str, Any] = {}
+        self._file_locks_lock = threading.Lock()
+
+        # Track proposed change files for cleanup
+        self._proposed_changes: Set[str] = set()
+
+        # Auto cleanup on exit
+        if auto_cleanup:
+            atexit.register(self._cleanup_on_exit)
 
         self.base_path.mkdir(parents=True, exist_ok=True)
         _safe_print(f"[DIR] Project folder: {self.base_path.absolute()}\n")
@@ -93,29 +123,47 @@ class FileManager:
 
         Args:
             transaction_id: Optional identifier for the transaction
+
+        Raises:
+            RuntimeError: If nested transactions attempted
         """
         txn_id = transaction_id or f"txn_{int(time.time() * 1000)}"
 
-        with self._transaction_lock:
+        # Atomic check-and-set with the lock held throughout the critical section
+        self._transaction_lock.acquire()
+        try:
             if self._current_transaction is not None:
                 raise RuntimeError("Nested transactions are not supported")
-
             self._current_transaction = Transaction(id=txn_id)
+            # Store reference before releasing lock
+            current_txn = self._current_transaction
+        finally:
+            self._transaction_lock.release()
 
+        exception_raised = False
         try:
-            yield self._current_transaction
-            # Commit on successful completion
-            with self._transaction_lock:
-                if self._current_transaction:
-                    self._current_transaction.committed = True
-                    _safe_print(f"   [✓] Transaction {txn_id} committed")
-        except Exception as e:
-            # Rollback on exception
-            self.rollback()
+            yield current_txn
+        except Exception:
+            exception_raised = True
+            # Rollback on exception - acquire lock for rollback
+            self._transaction_lock.acquire()
+            try:
+                self._do_rollback()
+            finally:
+                self._current_transaction = None
+                self._transaction_lock.release()
             raise
         finally:
-            with self._transaction_lock:
-                self._current_transaction = None
+            if not exception_raised:
+                # Commit on successful completion - atomic operation
+                self._transaction_lock.acquire()
+                try:
+                    if self._current_transaction and self._current_transaction.id == txn_id:
+                        self._current_transaction.committed = True
+                        _safe_print(f"   [OK] Transaction {txn_id} committed")
+                    self._current_transaction = None
+                finally:
+                    self._transaction_lock.release()
 
     def _snapshot_file(self, rel_path: str) -> FileSnapshot:
         """Create a snapshot of a file before modification."""
@@ -140,45 +188,55 @@ class FileManager:
                     "timestamp": time.time()
                 })
 
+    def _do_rollback(self) -> bool:
+        """Internal rollback implementation (assumes lock is already held).
+
+        Returns:
+            True if rollback was successful, False otherwise
+        """
+        if self._current_transaction is None:
+            logger.warning("No active transaction to rollback")
+            return False
+
+        if self._current_transaction.rolled_back:
+            return True
+
+        txn = self._current_transaction
+        _safe_print(f"   [!] Rolling back transaction {txn.id}...")
+
+        success = True
+        for rel_path, snapshot in txn.snapshots.items():
+            try:
+                full_path = self.base_path / rel_path
+
+                if snapshot.existed and snapshot.content is not None:
+                    # Restore original content
+                    full_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(full_path, "w", encoding="utf-8") as f:
+                        f.write(snapshot.content)
+                    _safe_print(f"   [<-] Restored: {rel_path}")
+                elif not snapshot.existed:
+                    # File didn't exist before, delete it
+                    if full_path.exists():
+                        full_path.unlink()
+                        _safe_print(f"   [x] Removed: {rel_path}")
+            except Exception as e:
+                logger.exception(f"Failed to rollback {rel_path}: {e}")
+                success = False
+
+        txn.rolled_back = True
+        return success
+
     def rollback(self) -> bool:
         """Rollback all changes in the current transaction.
+
+        Thread-safe public API for manual rollback.
 
         Returns:
             True if rollback was successful, False otherwise
         """
         with self._transaction_lock:
-            if self._current_transaction is None:
-                logger.warning("No active transaction to rollback")
-                return False
-
-            if self._current_transaction.rolled_back:
-                return True
-
-            txn = self._current_transaction
-            _safe_print(f"   [!] Rolling back transaction {txn.id}...")
-
-            success = True
-            for rel_path, snapshot in txn.snapshots.items():
-                try:
-                    full_path = self.base_path / rel_path
-
-                    if snapshot.existed and snapshot.content is not None:
-                        # Restore original content
-                        full_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(full_path, "w", encoding="utf-8") as f:
-                            f.write(snapshot.content)
-                        _safe_print(f"   [←] Restored: {rel_path}")
-                    elif not snapshot.existed:
-                        # File didn't exist before, delete it
-                        if full_path.exists():
-                            full_path.unlink()
-                            _safe_print(f"   [×] Removed: {rel_path}")
-                except Exception as e:
-                    logger.exception(f"Failed to rollback {rel_path}: {e}")
-                    success = False
-
-            txn.rolled_back = True
-            return success
+            return self._do_rollback()
 
     def create_backup(self, rel_path: str) -> Optional[str]:
         """Create a backup of a file before modification.
@@ -844,7 +902,242 @@ All stages failed - content may have changed or old_code is incorrect.
         if preview_lines:
             preview = ' '.join(preview_lines[:2])[:100]
             summary_parts.append(f"   Preview: {preview}...")
-        
+
         return '\n'.join(summary_parts)
+
+    # === File Locking for Multi-Process Safety ===
+
+    @contextmanager
+    def _file_lock(self, rel_path: str, exclusive: bool = True):
+        """Acquire a file lock for multi-process safety.
+
+        Args:
+            rel_path: Relative path to the file
+            exclusive: True for write lock, False for read lock
+
+        Yields:
+            The file handle with lock acquired
+        """
+        full_path = self.base_path / rel_path
+        lock_path = full_path.with_suffix(full_path.suffix + '.lock')
+
+        try:
+            # Create lock file if needed
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = open(lock_path, 'w')
+
+            # Acquire lock with timeout
+            start_time = time.time()
+            while True:
+                try:
+                    if exclusive:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    else:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    break
+                except (IOError, OSError):
+                    if time.time() - start_time > FILE_LOCK_TIMEOUT:
+                        lock_file.close()
+                        raise TimeoutError(f"Could not acquire lock for {rel_path}")
+                    time.sleep(0.1)
+
+            try:
+                yield lock_file
+            finally:
+                # Release lock
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+
+        except (AttributeError, ImportError):
+            # fcntl not available (Windows) - fall back to thread lock only
+            yield None
+
+    # === Backup Size Management ===
+
+    def _get_total_backup_size(self) -> int:
+        """Get total size of all backups in bytes."""
+        if not self._backup_dir.exists():
+            return 0
+
+        total = 0
+        try:
+            for backup_file in self._backup_dir.glob("*.bak"):
+                total += backup_file.stat().st_size
+        except Exception as e:
+            logger.warning(f"Error calculating backup size: {e}")
+
+        return total
+
+    def _cleanup_old_backups_by_size(self):
+        """Remove oldest backups if total size exceeds limit."""
+        if not self._backup_dir.exists():
+            return
+
+        total_size = self._get_total_backup_size()
+        if total_size <= self.max_backup_size:
+            return
+
+        try:
+            # Get all backups sorted by modification time (oldest first)
+            backups = sorted(
+                self._backup_dir.glob("*.bak"),
+                key=lambda p: p.stat().st_mtime
+            )
+
+            # Remove oldest backups until under limit
+            for backup in backups:
+                if total_size <= self.max_backup_size:
+                    break
+                try:
+                    size = backup.stat().st_size
+                    backup.unlink()
+                    total_size -= size
+                    logger.debug(f"Removed old backup: {backup.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove backup {backup}: {e}")
+
+        except Exception as e:
+            logger.warning(f"Backup cleanup failed: {e}")
+
+    # === Proposed Change Management ===
+
+    def cleanup_proposed_changes(self, max_age_hours: float = 24.0) -> int:
+        """Clean up old .proposed_change files.
+
+        Args:
+            max_age_hours: Remove proposed changes older than this
+
+        Returns:
+            Number of files removed
+        """
+        removed = 0
+        cutoff = datetime.now() - timedelta(hours=max_age_hours)
+
+        try:
+            for proposed_file in self.base_path.rglob("*.proposed_change"):
+                try:
+                    mtime = datetime.fromtimestamp(proposed_file.stat().st_mtime)
+                    if mtime < cutoff:
+                        proposed_file.unlink()
+                        removed += 1
+                        logger.debug(f"Removed old proposed change: {proposed_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove {proposed_file}: {e}")
+
+            # Also clean tracked ones that no longer exist
+            self._proposed_changes = {
+                p for p in self._proposed_changes
+                if (self.base_path / p).exists()
+            }
+
+        except Exception as e:
+            logger.warning(f"Proposed change cleanup failed: {e}")
+
+        return removed
+
+    def list_proposed_changes(self) -> List[Dict[str, Any]]:
+        """List all pending proposed changes.
+
+        Returns:
+            List of dicts with path, age, and size info
+        """
+        changes = []
+
+        try:
+            for proposed_file in self.base_path.rglob("*.proposed_change"):
+                stat = proposed_file.stat()
+                rel_path = proposed_file.relative_to(self.base_path)
+                original_file = str(rel_path).replace('.proposed_change', '')
+
+                changes.append({
+                    "proposed_file": str(rel_path),
+                    "original_file": original_file,
+                    "size": stat.st_size,
+                    "age_hours": (datetime.now() - datetime.fromtimestamp(stat.st_mtime)).total_seconds() / 3600,
+                    "created": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                })
+
+        except Exception as e:
+            logger.warning(f"Failed to list proposed changes: {e}")
+
+        return sorted(changes, key=lambda x: x["age_hours"], reverse=True)
+
+    def apply_proposed_change(self, proposed_file: str) -> bool:
+        """Apply a proposed change file to its target.
+
+        Args:
+            proposed_file: Path to the .proposed_change file
+
+        Returns:
+            True if applied successfully
+        """
+        proposed_path = self.base_path / proposed_file
+        if not proposed_path.exists():
+            logger.warning(f"Proposed change not found: {proposed_file}")
+            return False
+
+        try:
+            content = proposed_path.read_text(encoding='utf-8')
+
+            # Parse the proposed change format
+            if "--- NEW CODE (to replace with) ---" in content:
+                # Extract new code
+                parts = content.split("--- NEW CODE (to replace with) ---")
+                if len(parts) >= 2:
+                    new_code = parts[1].split("--- DEBUG INFO ---")[0].strip()
+
+                    # Get original file path from header
+                    if "File: " in content:
+                        original_file = content.split("File: ")[1].split("\n")[0].strip()
+
+                        # Write the new code
+                        self.write_file(original_file, new_code)
+
+                        # Remove proposed change file
+                        proposed_path.unlink()
+                        self._proposed_changes.discard(proposed_file)
+
+                        _safe_print(f"   [OK] Applied proposed change to {original_file}")
+                        return True
+
+            logger.warning(f"Could not parse proposed change format: {proposed_file}")
+            return False
+
+        except Exception as e:
+            logger.exception(f"Failed to apply proposed change: {e}")
+            return False
+
+    def _cleanup_on_exit(self):
+        """Cleanup handler called on exit."""
+        try:
+            # Clean up old proposed changes (older than 24 hours)
+            self.cleanup_proposed_changes(max_age_hours=24.0)
+
+            # Clean up excess backups
+            self._cleanup_old_backups_by_size()
+
+            # Remove any lock files we created
+            for lock_file in self.base_path.rglob("*.lock"):
+                try:
+                    lock_file.unlink()
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.warning(f"Cleanup on exit failed: {e}")
+
+    # === Statistics ===
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get file manager statistics."""
+        return {
+            "created_files": len(self.created_files),
+            "created_dirs": len(self.created_dirs),
+            "edit_count": len(self.edit_history),
+            "backup_count": len(list(self._backup_dir.glob("*.bak"))) if self._backup_dir.exists() else 0,
+            "backup_size_mb": self._get_total_backup_size() / (1024 * 1024),
+            "proposed_changes": len(list(self.base_path.rglob("*.proposed_change"))),
+            "has_active_transaction": self._current_transaction is not None
+        }
 
 

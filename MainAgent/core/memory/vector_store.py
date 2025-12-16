@@ -392,3 +392,42 @@ class VectorStore:
             return self.table.search().limit(1).to_pandas().shape[0] or len(self.table.search().to_list())
         except Exception:
             return 0
+
+    def close(self):
+        """Close the vector store and cleanup resources.
+
+        Should be called when done using the vector store to free resources.
+        """
+        try:
+            # Save metadata before closing
+            self.save_to_disk()
+
+            # Clear table reference
+            self.table = None
+
+            # LanceDB doesn't require explicit close, but clear reference
+            self.db = None
+
+            # Clear embedding model if loaded
+            if self.model is not None:
+                self.model = None
+
+        except Exception as e:
+            print(f"Warning: Error during vector store cleanup: {e}")
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures cleanup."""
+        self.close()
+        return False
+
+    def __del__(self):
+        """Destructor - attempt cleanup if not already done."""
+        try:
+            if hasattr(self, 'db') and self.db is not None:
+                self.close()
+        except Exception:
+            pass  # Ignore errors during garbage collection
