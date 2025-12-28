@@ -98,8 +98,12 @@ def generate_diff(
     Returns:
         DiffResult with changes
     """
-    old_lines = old_content.splitlines(keepends=True)
-    new_lines = new_content.splitlines(keepends=True)
+    # Ensure content ends with newline for proper diff
+    old_normalized = old_content if old_content.endswith('\n') else old_content + '\n'
+    new_normalized = new_content if new_content.endswith('\n') else new_content + '\n'
+
+    old_lines = old_normalized.splitlines(keepends=True)
+    new_lines = new_normalized.splitlines(keepends=True)
 
     # Generate unified diff
     unified = list(difflib.unified_diff(

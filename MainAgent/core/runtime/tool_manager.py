@@ -386,20 +386,49 @@ class ToolManager:
 
         return stats
 
+    def get_tool_schema(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get schema for a specific tool.
+
+        Args:
+            name: Tool name
+
+        Returns:
+            Tool schema dict or None if not found
+        """
+        tool = self._tools.get(name)
+        if tool:
+            return tool.get_schema()
+        return None
+
 
 def tool(
-    name: str = None,
+    manager_or_name: Union[ToolManager, str, None] = None,
     description: str = None,
     category: ToolCategory = ToolCategory.UTILITY,
     requires_confirmation: bool = False,
+    name: str = None,
 ):
     """Decorator to register a function as a tool.
 
     Usage:
+        # Without auto-registration (stores metadata only)
         @tool(name="my_tool", description="Does something")
         def my_tool(arg1: str, arg2: int = 10) -> str:
             return f"Result: {arg1}, {arg2}"
+
+        # With auto-registration to a manager
+        @tool(manager, description="Does something")
+        def my_tool(arg1: str, arg2: int = 10) -> str:
+            return f"Result: {arg1}, {arg2}"
     """
+    # Handle case where manager is passed as first arg
+    manager = None
+    tool_name = name
+    if isinstance(manager_or_name, ToolManager):
+        manager = manager_or_name
+    elif isinstance(manager_or_name, str):
+        tool_name = manager_or_name
+
     def decorator(func: Callable) -> Callable:
         # Extract parameters from function signature
         sig = inspect.signature(func)
@@ -421,10 +450,13 @@ def tool(
                 default=default,
             ))
 
+        final_name = tool_name or func.__name__
+        final_description = description or func.__doc__ or f"Tool: {func.__name__}"
+
         # Store tool metadata on function
         func._tool_metadata = {
-            "name": name or func.__name__,
-            "description": description or func.__doc__ or f"Tool: {func.__name__}",
+            "name": final_name,
+            "description": final_description,
             "category": category,
             "parameters": parameters,
             "requires_confirmation": requires_confirmation,
@@ -435,6 +467,18 @@ def tool(
             return func(*args, **kwargs)
 
         wrapper._tool_metadata = func._tool_metadata
+
+        # Auto-register if manager provided
+        if manager is not None:
+            manager.register(
+                name=final_name,
+                handler=wrapper,
+                description=final_description,
+                category=category,
+                parameters=parameters,
+                requires_confirmation=requires_confirmation,
+            )
+
         return wrapper
 
     return decorator
