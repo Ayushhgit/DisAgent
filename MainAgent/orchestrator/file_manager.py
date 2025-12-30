@@ -17,8 +17,15 @@ import time
 import shutil
 import threading
 import tempfile
-import fcntl
 import hashlib
+
+# fcntl is Unix-only, handle Windows gracefully
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    fcntl = None
+    HAS_FCNTL = False
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
 from dataclasses import dataclass, field
@@ -918,6 +925,11 @@ All stages failed - content may have changed or old_code is incorrect.
         Yields:
             The file handle with lock acquired
         """
+        # On Windows (no fcntl), fall back to thread lock only
+        if not HAS_FCNTL:
+            yield None
+            return
+
         full_path = self.base_path / rel_path
         lock_path = full_path.with_suffix(full_path.suffix + '.lock')
 
@@ -949,7 +961,7 @@ All stages failed - content may have changed or old_code is incorrect.
                 lock_file.close()
 
         except (AttributeError, ImportError):
-            # fcntl not available (Windows) - fall back to thread lock only
+            # Fallback if something goes wrong
             yield None
 
     # === Backup Size Management ===
