@@ -81,6 +81,24 @@ class TaskPlanner:
         Returns list of registered task ids.
         """
         tasks = self.create_tasks_from_scope(scope)
+
+        # Get set of valid task IDs
+        valid_task_ids = {t.task_id for t in tasks}
+
+        # Filter dependencies to only include valid task IDs
+        # (LLM sometimes puts file names instead of task IDs in dependencies)
+        for task in tasks:
+            if task.dependencies:
+                original_deps = list(task.dependencies)
+                filtered_deps = [d for d in task.dependencies if d in valid_task_ids]
+                if len(filtered_deps) != len(original_deps):
+                    invalid_deps = set(original_deps) - set(filtered_deps)
+                    logger.debug(
+                        "Task %s: filtered out invalid dependencies: %s",
+                        task.task_id, invalid_deps
+                    )
+                task.dependencies = filtered_deps
+
         # validate dependency graph
         dep_map = {t.task_id: list(t.dependencies or []) for t in tasks}
         if not self.validator.validate_dependencies(dep_map):
