@@ -11,6 +11,7 @@ from .extractors import extract_and_apply_edits, extract_and_write_files
 from .file_manager import FileManager
 from core.runtime.llm import llm_call
 from core.memory.memory_types import MemoryPriority
+from core.runtime.code_validator import validate_file, format_validation_errors, ValidationResult
 
 # Global statistics tracking (shared across agent executions)
 _execution_stats: Dict[str, Any] = {
@@ -63,6 +64,81 @@ def _update_stats(
     _execution_stats["agent_durations"][agent_name] = duration
 
 
+def _validate_generated_files(
+    file_manager: FileManager,
+    files_written: Dict[str, int],
+    edits_applied: Dict[str, bool]
+) -> tuple[bool, List[ValidationResult]]:
+    """Validate all generated/edited files for syntax errors.
+
+    Returns:
+        Tuple of (all_valid, list of validation results with errors)
+    """
+    results = []
+    all_valid = True
+
+    # Validate newly created files
+    for filepath in files_written.keys():
+        content = file_manager.read_file(filepath)
+        if content:
+            result = validate_file(filepath, content)
+            if not result.valid:
+                results.append(result)
+                all_valid = False
+
+    # Validate edited files
+    for filepath, success in edits_applied.items():
+        if success and not filepath.endswith(('_append', '_insert')):
+            content = file_manager.read_file(filepath)
+            if content:
+                result = validate_file(filepath, content)
+                if not result.valid:
+                    results.append(result)
+                    all_valid = False
+
+    return all_valid, results
+
+
+def _build_correction_prompt(
+    original_prompt: str,
+    original_output: str,
+    validation_errors: List[ValidationResult],
+    file_manager: FileManager
+) -> str:
+    """Build a prompt asking the LLM to fix validation errors."""
+    error_summary = format_validation_errors(validation_errors)
+
+    # Get current content of files with errors
+    file_contents = ""
+    for result in validation_errors:
+        content = file_manager.read_file(result.file_path)
+        if content:
+            file_contents += f"\n=== CURRENT CONTENT OF {result.file_path} ===\n"
+            file_contents += content[:2000]  # Limit size
+            if len(content) > 2000:
+                file_contents += "\n... (truncated)"
+            file_contents += "\n"
+
+    return f"""Your previous code generation had SYNTAX ERRORS that need to be fixed.
+
+{error_summary}
+
+{file_contents}
+
+Please provide CORRECTED versions of the files with errors.
+Use the same format as before:
+- For new files: ```filename: path/to/file.ext
+- For edits: ===EDIT=== blocks
+
+IMPORTANT:
+1. Fix ALL the syntax errors listed above
+2. Make sure brackets, braces, and parentheses are balanced
+3. Ensure proper indentation (especially for Python)
+4. Do not change working code - only fix the errors
+
+Provide the corrected code now:"""
+
+
 def create_dynamic_agent(
     agent_name: str,
     custom_prompt: str,
@@ -72,6 +148,7 @@ def create_dynamic_agent(
     allowed_files: Optional[List[str]] = None,
     critic_agent=None,  # Optional CriticAgent for output review
     verification_loop=None,  # Optional VerificationLoop for validation
+    max_retries: int = 2,  # Maximum correction attempts
 ) -> str:
     """Execute a dynamic agent prompt and materialize produced files.
 
@@ -340,6 +417,71 @@ FILE ACCESS:
 
     if not files_written and not edits_applied:
         print(f"\n   [WARN] WARNING: No file changes made by {agent_name}")
+
+    # === VALIDATION AND RETRY LOOP ===
+    # Validate generated files for syntax errors and retry if needed
+    retry_count = 0
+    while retry_count < max_retries:
+        if not files_written and not edits_applied:
+            break  # Nothing to validate
+
+        print(f"\n   [VALIDATE] Checking generated files for syntax errors...")
+        is_valid, validation_errors = _validate_generated_files(
+            file_manager, files_written, edits_applied
+        )
+
+        if is_valid:
+            print(f"   [OK] All files passed validation!")
+            break
+
+        # Validation failed - show errors
+        retry_count += 1
+        print(f"\n   [ERROR] Validation failed! Found {len(validation_errors)} file(s) with errors:")
+        for result in validation_errors:
+            print(f"      - {result.file_path}: {', '.join(result.errors[:2])}")
+
+        if retry_count >= max_retries:
+            print(f"   [WARN] Max retries ({max_retries}) reached. Some files may have syntax errors.")
+            # Record to memory
+            if context.unified_memory:
+                for result in validation_errors:
+                    context.unified_memory.short_term.add_error(
+                        agent_id=agent_name,
+                        error=f"Syntax error in {result.file_path}: {result.errors[0] if result.errors else 'unknown'}",
+                        context="Validation failed after retries"
+                    )
+            break
+
+        # Ask LLM to fix the errors
+        print(f"\n   [RETRY] Attempt {retry_count}/{max_retries} - Asking LLM to fix errors...")
+
+        correction_prompt = _build_correction_prompt(
+            full_prompt, output, validation_errors, file_manager
+        )
+
+        try:
+            correction_output = llm_call(correction_prompt, max_tokens=4096, temperature=0.3)
+            if correction_output and len(correction_output) > 50:
+                # Apply corrections
+                print(f"   [FIX] Applying corrections...")
+                new_files = extract_and_write_files(correction_output, file_manager, f"{agent_name}_fix")
+                new_edits = extract_and_apply_edits(correction_output, file_manager, f"{agent_name}_fix")
+
+                # Update counts
+                files_written.update(new_files)
+                edits_applied.update(new_edits)
+
+                if new_files or new_edits:
+                    print(f"   [OK] Applied {len(new_files)} file writes and {len(new_edits)} edits")
+                else:
+                    print(f"   [WARN] No corrections could be applied")
+                    break
+            else:
+                print(f"   [WARN] LLM returned empty correction")
+                break
+        except Exception as e:
+            print(f"   [ERROR] Correction failed: {e}")
+            break
 
     # Track execution statistics
     duration = time.time() - start_time
