@@ -1,0 +1,24 @@
+{
+  "63a391139da7": {
+    "pattern_id": "63a391139da7",
+    "error_type": "ImportError",
+    "affected_task_types": [
+      "setup"
+    ],
+    "occurrence_count": 50,
+    "successful_recoveries": 45,
+    "best_strategies": {
+      "strat_A": 20,
+      "strat_B": 25
+    },
+    "valid_environments": [
+      "env_v1",
+      "env_v2"
+    ],
+    "last_verified_at": "2026-01-16T00:38:33.269574",
+    "associated_rules": [
+      "7f02cd454411",
+      "f4087bddbb0c"
+    ]
+  }
+}

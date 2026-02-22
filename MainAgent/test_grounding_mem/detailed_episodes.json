@@ -1,0 +1,71 @@
+[
+  {
+    "experience_id": "exp_gnd_0",
+    "task_id": "task_0",
+    "agent_id": "test_agent",
+    "timestamp": "2026-01-25T17:02:55.634651",
+    "task_type": "api_call",
+    "task_description": "",
+    "file_path": null,
+    "environment_hash": "env_old",
+    "error_type": "TypeError",
+    "error_context": null,
+    "patch_strategy": "use_new_api",
+    "diff_summary": "",
+    "success": true,
+    "context_hash": "984a6abd",
+    "metrics": {
+      "pass_at_1": false,
+      "retry_count": 0,
+      "tokens_used": 0,
+      "execution_time_ms": 0.0,
+      "cost_estimate_usd": 0.0
+    }
+  },
+  {
+    "experience_id": "exp_gnd_1",
+    "task_id": "task_1",
+    "agent_id": "test_agent",
+    "timestamp": "2026-01-25T17:02:55.639251",
+    "task_type": "api_call",
+    "task_description": "",
+    "file_path": null,
+    "environment_hash": "env_old",
+    "error_type": "TypeError",
+    "error_context": null,
+    "patch_strategy": "use_new_api",
+    "diff_summary": "",
+    "success": true,
+    "context_hash": "984a6abd",
+    "metrics": {
+      "pass_at_1": false,
+      "retry_count": 0,
+      "tokens_used": 0,
+      "execution_time_ms": 0.0,
+      "cost_estimate_usd": 0.0
+    }
+  },
+  {
+    "experience_id": "exp_gnd_2",
+    "task_id": "task_2",
+    "agent_id": "test_agent",
+    "timestamp": "2026-01-25T17:02:55.643068",
+    "task_type": "api_call",
+    "task_description": "",
+    "file_path": null,
+    "environment_hash": "env_old",
+    "error_type": "TypeError",
+    "error_context": null,
+    "patch_strategy": "use_new_api",
+    "diff_summary": "",
+    "success": true,
+    "context_hash": "984a6abd",
+    "metrics": {
+      "pass_at_1": false,
+      "retry_count": 0,
+      "tokens_used": 0,
+      "execution_time_ms": 0.0,
+      "cost_estimate_usd": 0.0
+    }
+  }
+]

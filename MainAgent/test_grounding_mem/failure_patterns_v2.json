@@ -1,0 +1,21 @@
+{
+  "a8a253bc7caf": {
+    "pattern_id": "a8a253bc7caf",
+    "error_type": "TypeError",
+    "affected_task_types": [
+      "api_call"
+    ],
+    "occurrence_count": 3,
+    "successful_recoveries": 3,
+    "best_strategies": {
+      "use_new_api": 3
+    },
+    "valid_environments": [
+      "env_old"
+    ],
+    "last_verified_at": "2026-01-25T17:02:55.643068",
+    "associated_rules": [
+      "2e2683ce284d"
+    ]
+  }
+}

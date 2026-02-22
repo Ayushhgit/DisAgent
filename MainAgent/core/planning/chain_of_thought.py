@@ -1,4 +1,3 @@
-# core/planning/chain_of_thought.py
 """
 Chain-of-Thought Processor
 
@@ -18,11 +17,7 @@ logger = logging.getLogger(__name__)
 
 class ChainOfThoughtProcessor:
     """
-    Convert verbose reasoning into a structured, safe-to-store representation.
-
-    Typical usage:
-        processor = ChainOfThoughtProcessor()
-        plan = processor.process_raw_reasoning(raw_llm_text)
+    convert verbose reasoning into a structured, safe-to-store representation.
     """
 
     # heuristics thresholds

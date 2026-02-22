@@ -1,0 +1,22 @@
+{
+  "2e2683ce284d": {
+    "rule_id": "2e2683ce284d",
+    "trigger_error_type": "TypeError",
+    "trigger_task_type": "api_call",
+    "suggested_strategy": "use_new_api",
+    "confidence": 1.0,
+    "source_episode_ids": [
+      "exp_gnd_0",
+      "exp_gnd_1",
+      "exp_gnd_2"
+    ],
+    "valid_environments": [
+      "env_old"
+    ],
+    "created_at": "2026-01-25T17:02:55.645610",
+    "retrieval_count": 0,
+    "success_after_retrieval": 0,
+    "interference_score": 0.0,
+    "last_grounded_at": null
+  }
+}
