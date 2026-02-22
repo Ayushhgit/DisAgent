@@ -1,0 +1,307 @@
+{
+  "config": {
+    "num_trials": 50,
+    "drift_point": 25,
+    "num_runs": 10,
+    "exploration_rate": 0.7,
+    "consolidation_interval": 5,
+    "consecutive_threshold": 3
+  },
+  "scenarios": {
+    "Pandas Migration": {
+      "DisAgent_Full": {
+        "pre_drift_accuracy_mean": 0.944,
+        "pre_drift_accuracy_std": 0.0207,
+        "post_drift_accuracy_mean": 0.76,
+        "post_drift_accuracy_std": 0.0,
+        "negative_transfer_rate_mean": 0.08,
+        "negative_transfer_rate_std": 0.0,
+        "adaptation_latency_mean": 7.0,
+        "adaptation_latency_std": 0.0,
+        "overall_success_rate_mean": 0.954,
+        "overall_success_rate_std": 0.0267,
+        "avg_staleness_curve": [
+          0.4,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "No_Consolidation": {
+        "pre_drift_accuracy_mean": 0.952,
+        "pre_drift_accuracy_std": 0.0169,
+        "post_drift_accuracy_mean": 0.896,
+        "post_drift_accuracy_std": 0.043,
+        "negative_transfer_rate_mean": 0.104,
+        "negative_transfer_rate_std": 0.043,
+        "adaptation_latency_mean": 3.6,
+        "adaptation_latency_std": 1.075,
+        "overall_success_rate_mean": 0.984,
+        "overall_success_rate_std": 0.0227,
+        "avg_staleness_curve": [
+          0.52,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "Naive_RAG": {
+        "pre_drift_accuracy_mean": 0.936,
+        "pre_drift_accuracy_std": 0.0386,
+        "post_drift_accuracy_mean": 0.812,
+        "post_drift_accuracy_std": 0.0598,
+        "negative_transfer_rate_mean": 0.188,
+        "negative_transfer_rate_std": 0.0598,
+        "adaptation_latency_mean": 5.7,
+        "adaptation_latency_std": 1.4944,
+        "overall_success_rate_mean": 0.954,
+        "overall_success_rate_std": 0.0284,
+        "avg_staleness_curve": [
+          0.84,
+          0.1,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "OpenAI SDK Migration": {
+      "DisAgent_Full": {
+        "pre_drift_accuracy_mean": 0.952,
+        "pre_drift_accuracy_std": 0.0169,
+        "post_drift_accuracy_mean": 0.76,
+        "post_drift_accuracy_std": 0.0,
+        "negative_transfer_rate_mean": 0.08,
+        "negative_transfer_rate_std": 0.0,
+        "adaptation_latency_mean": 7.0,
+        "adaptation_latency_std": 0.0,
+        "overall_success_rate_mean": 0.96,
+        "overall_success_rate_std": 0.0231,
+        "avg_staleness_curve": [
+          0.4,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "No_Consolidation": {
+        "pre_drift_accuracy_mean": 0.948,
+        "pre_drift_accuracy_std": 0.027,
+        "post_drift_accuracy_mean": 0.892,
+        "post_drift_accuracy_std": 0.0501,
+        "negative_transfer_rate_mean": 0.108,
+        "negative_transfer_rate_std": 0.0501,
+        "adaptation_latency_mean": 3.7,
+        "adaptation_latency_std": 1.2517,
+        "overall_success_rate_mean": 0.98,
+        "overall_success_rate_std": 0.0313,
+        "avg_staleness_curve": [
+          0.52,
+          0.02,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "Naive_RAG": {
+        "pre_drift_accuracy_mean": 0.932,
+        "pre_drift_accuracy_std": 0.0655,
+        "post_drift_accuracy_mean": 0.832,
+        "post_drift_accuracy_std": 0.0413,
+        "negative_transfer_rate_mean": 0.168,
+        "negative_transfer_rate_std": 0.0413,
+        "adaptation_latency_mean": 5.2,
+        "adaptation_latency_std": 1.0328,
+        "overall_success_rate_mean": 0.962,
+        "overall_success_rate_std": 0.0358,
+        "avg_staleness_curve": [
+          0.82,
+          0.02,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "SQLAlchemy Migration": {
+      "DisAgent_Full": {
+        "pre_drift_accuracy_mean": 0.952,
+        "pre_drift_accuracy_std": 0.0169,
+        "post_drift_accuracy_mean": 0.76,
+        "post_drift_accuracy_std": 0.0,
+        "negative_transfer_rate_mean": 0.08,
+        "negative_transfer_rate_std": 0.0,
+        "adaptation_latency_mean": 7.0,
+        "adaptation_latency_std": 0.0,
+        "overall_success_rate_mean": 0.956,
+        "overall_success_rate_std": 0.028,
+        "avg_staleness_curve": [
+          0.4,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "No_Consolidation": {
+        "pre_drift_accuracy_mean": 0.94,
+        "pre_drift_accuracy_std": 0.034,
+        "post_drift_accuracy_mean": 0.9,
+        "post_drift_accuracy_std": 0.0283,
+        "negative_transfer_rate_mean": 0.1,
+        "negative_transfer_rate_std": 0.0283,
+        "adaptation_latency_mean": 3.5,
+        "adaptation_latency_std": 0.7071,
+        "overall_success_rate_mean": 0.98,
+        "overall_success_rate_std": 0.0211,
+        "avg_staleness_curve": [
+          0.5,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "Naive_RAG": {
+        "pre_drift_accuracy_mean": 0.948,
+        "pre_drift_accuracy_std": 0.027,
+        "post_drift_accuracy_mean": 0.82,
+        "post_drift_accuracy_std": 0.0783,
+        "negative_transfer_rate_mean": 0.18,
+        "negative_transfer_rate_std": 0.0783,
+        "adaptation_latency_mean": 5.5,
+        "adaptation_latency_std": 1.9579,
+        "overall_success_rate_mean": 0.964,
+        "overall_success_rate_std": 0.047,
+        "avg_staleness_curve": [
+          0.78,
+          0.12,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "Pydantic Migration": {
+      "DisAgent_Full": {
+        "pre_drift_accuracy_mean": 0.956,
+        "pre_drift_accuracy_std": 0.0126,
+        "post_drift_accuracy_mean": 0.76,
+        "post_drift_accuracy_std": 0.0,
+        "negative_transfer_rate_mean": 0.08,
+        "negative_transfer_rate_std": 0.0,
+        "adaptation_latency_mean": 7.0,
+        "adaptation_latency_std": 0.0,
+        "overall_success_rate_mean": 0.972,
+        "overall_success_rate_std": 0.0235,
+        "avg_staleness_curve": [
+          0.4,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "No_Consolidation": {
+        "pre_drift_accuracy_mean": 0.944,
+        "pre_drift_accuracy_std": 0.028,
+        "post_drift_accuracy_mean": 0.892,
+        "post_drift_accuracy_std": 0.027,
+        "negative_transfer_rate_mean": 0.108,
+        "negative_transfer_rate_std": 0.027,
+        "adaptation_latency_mean": 3.7,
+        "adaptation_latency_std": 0.6749,
+        "overall_success_rate_mean": 0.978,
+        "overall_success_rate_std": 0.0175,
+        "avg_staleness_curve": [
+          0.54,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "Naive_RAG": {
+        "pre_drift_accuracy_mean": 0.948,
+        "pre_drift_accuracy_std": 0.0193,
+        "post_drift_accuracy_mean": 0.848,
+        "post_drift_accuracy_std": 0.0316,
+        "negative_transfer_rate_mean": 0.152,
+        "negative_transfer_rate_std": 0.0316,
+        "adaptation_latency_mean": 4.8,
+        "adaptation_latency_std": 0.7888,
+        "overall_success_rate_mean": 0.978,
+        "overall_success_rate_std": 0.0199,
+        "avg_staleness_curve": [
+          0.76,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "Path Handling Paradigm": {
+      "DisAgent_Full": {
+        "pre_drift_accuracy_mean": 0.952,
+        "pre_drift_accuracy_std": 0.0253,
+        "post_drift_accuracy_mean": 0.76,
+        "post_drift_accuracy_std": 0.0,
+        "negative_transfer_rate_mean": 0.08,
+        "negative_transfer_rate_std": 0.0,
+        "adaptation_latency_mean": 7.0,
+        "adaptation_latency_std": 0.0,
+        "overall_success_rate_mean": 0.968,
+        "overall_success_rate_std": 0.0301,
+        "avg_staleness_curve": [
+          0.4,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "No_Consolidation": {
+        "pre_drift_accuracy_mean": 0.952,
+        "pre_drift_accuracy_std": 0.0169,
+        "post_drift_accuracy_mean": 0.884,
+        "post_drift_accuracy_std": 0.0295,
+        "negative_transfer_rate_mean": 0.116,
+        "negative_transfer_rate_std": 0.0295,
+        "adaptation_latency_mean": 3.9,
+        "adaptation_latency_std": 0.7379,
+        "overall_success_rate_mean": 0.978,
+        "overall_success_rate_std": 0.0148,
+        "avg_staleness_curve": [
+          0.58,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "Naive_RAG": {
+        "pre_drift_accuracy_mean": 0.944,
+        "pre_drift_accuracy_std": 0.028,
+        "post_drift_accuracy_mean": 0.852,
+        "post_drift_accuracy_std": 0.027,
+        "negative_transfer_rate_mean": 0.148,
+        "negative_transfer_rate_std": 0.027,
+        "adaptation_latency_mean": 4.7,
+        "adaptation_latency_std": 0.6749,
+        "overall_success_rate_mean": 0.978,
+        "overall_success_rate_std": 0.022,
+        "avg_staleness_curve": [
+          0.74,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    }
+  }
+}
