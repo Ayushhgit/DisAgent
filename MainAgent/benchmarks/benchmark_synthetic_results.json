@@ -1,0 +1,98 @@
+{
+    "pass_at_1": 4,
+    "total_executions": 5,
+    "total_corrupted_files_runs": 0,
+    "total_time_seconds": 48.31161141395569,
+    "recovery_success": 0,
+    "total_failures": 1,
+    "traces_captured": 0,
+    "runs": [
+        {
+            "run_id": "algorithmic_fib_fact_trial_0",
+            "elapsed_time": 2.06,
+            "pass_at_1": false,
+            "recovery_success": false,
+            "is_corrupted": false,
+            "trace_captured": false,
+            "v_stats": {
+                "total_verifications": 0,
+                "successful": 0,
+                "failed": 0,
+                "retries": 0,
+                "rollbacks": 0
+            },
+            "error": "'str' object has no attribute 'value'"
+        },
+        {
+            "run_id": "class_calculator_trial_0",
+            "elapsed_time": 5.02,
+            "pass_at_1": true,
+            "recovery_success": false,
+            "is_corrupted": false,
+            "trace_captured": false,
+            "v_stats": {
+                "total_verifications": 0,
+                "successful": 0,
+                "failed": 0,
+                "retries": 0,
+                "rollbacks": 0
+            },
+            "error": null
+        },
+        {
+            "run_id": "data_structure_linked_list_trial_0",
+            "elapsed_time": 6.48,
+            "pass_at_1": true,
+            "recovery_success": false,
+            "is_corrupted": false,
+            "trace_captured": false,
+            "v_stats": {
+                "total_verifications": 0,
+                "successful": 0,
+                "failed": 0,
+                "retries": 0,
+                "rollbacks": 0
+            },
+            "error": null
+        },
+        {
+            "run_id": "string_parser_trial_0",
+            "elapsed_time": 11.56,
+            "pass_at_1": true,
+            "recovery_success": false,
+            "is_corrupted": false,
+            "trace_captured": false,
+            "v_stats": {
+                "total_verifications": 0,
+                "successful": 0,
+                "failed": 0,
+                "retries": 0,
+                "rollbacks": 0
+            },
+            "error": null
+        },
+        {
+            "run_id": "simple_api_mock_trial_0",
+            "elapsed_time": 23.19,
+            "pass_at_1": true,
+            "recovery_success": false,
+            "is_corrupted": false,
+            "trace_captured": false,
+            "v_stats": {
+                "total_verifications": 0,
+                "successful": 0,
+                "failed": 0,
+                "retries": 0,
+                "rollbacks": 0
+            },
+            "error": null
+        }
+    ],
+    "metrics": {
+        "pass_at_1_rate": 0.8,
+        "recovery_success_rate": 0.0,
+        "file_corruption_rate": 0.0,
+        "trace_completeness": 0.0,
+        "avg_time_per_task": 9.66
+    }
+}

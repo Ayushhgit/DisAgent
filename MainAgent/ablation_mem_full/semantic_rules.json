@@ -6,22 +6,23 @@
     "suggested_strategy": "strat_A",
     "confidence": 1.3000000000000003,
     "source_episode_ids": [
-      "exp_0",
       "exp_1",
       "exp_2",
-      "exp_3",
       "exp_4",
       "exp_5",
       "exp_6",
       "exp_7",
       "exp_8",
-      "exp_9",
       "exp_10"
     ],
     "valid_environments": [
       "env_v1"
     ],
-    "created_at": "2026-01-16T00:38:32.976876"
+    "created_at": "2026-02-22T20:10:59.363906",
+    "retrieval_count": 39,
+    "success_after_retrieval": 0,
+    "interference_score": 0.0,
+    "last_grounded_at": null
   },
   "f4087bddbb0c": {
     "rule_id": "f4087bddbb0c",
@@ -32,14 +33,19 @@
     "source_episode_ids": [
       "exp_21",
       "exp_22",
-      "exp_24",
-      "exp_25",
+      "exp_23",
+      "exp_27",
+      "exp_28",
       "exp_29",
       "exp_30"
     ],
     "valid_environments": [
       "env_v2"
     ],
-    "created_at": "2026-01-16T00:38:33.073526"
+    "created_at": "2026-02-22T20:10:59.418127",
+    "retrieval_count": 19,
+    "success_after_retrieval": 0,
+    "interference_score": 0.0,
+    "last_grounded_at": null
   }
 }

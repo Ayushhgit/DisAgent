@@ -6,15 +6,15 @@
       "setup"
     ],
     "occurrence_count": 50,
-    "successful_recoveries": 48,
+    "successful_recoveries": 33,
     "best_strategies": {
-      "strat_A": 20,
-      "strat_B": 28
+      "strat_A": 15,
+      "strat_B": 18
     },
     "valid_environments": [
       "unknown_env"
     ],
-    "last_verified_at": "2026-01-16T00:38:34.035824",
+    "last_verified_at": "2026-02-22T20:10:59.755522",
     "associated_rules": []
   }
 }
